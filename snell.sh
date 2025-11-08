@@ -13,6 +13,101 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 RESET='\033[0m'
 
+# 系统/包管理器相关变量
+PACKAGE_MANAGER=""
+APT_UPDATED=false
+PACMAN_DB_UPDATED=false
+SNELL_USER="nobody"
+SNELL_GROUP="nogroup"
+IPTABLES_RULES_PATH="/etc/iptables/rules.v4"
+
+# 检测包管理器
+detect_package_manager() {
+    if [ -n "$PACKAGE_MANAGER" ]; then
+        return 0
+    fi
+
+    if command -v apt >/dev/null 2>&1; then
+        PACKAGE_MANAGER="apt"
+    elif command -v yum >/dev/null 2>&1; then
+        PACKAGE_MANAGER="yum"
+    elif command -v pacman >/dev/null 2>&1; then
+        PACKAGE_MANAGER="pacman"
+    else
+        echo -e "${RED}未检测到受支持的包管理器 (apt/yum/pacman)。${RESET}"
+        return 1
+    fi
+}
+
+# 通用依赖安装函数
+install_packages() {
+    local packages=("$@")
+    if [ ${#packages[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    if ! detect_package_manager; then
+        return 1
+    fi
+
+    case "$PACKAGE_MANAGER" in
+        apt)
+            wait_for_apt
+            if [ "$APT_UPDATED" = false ]; then
+                apt update || return 1
+                APT_UPDATED=true
+            fi
+            DEBIAN_FRONTEND=noninteractive apt install -y "${packages[@]}"
+            ;;
+        yum)
+            yum install -y "${packages[@]}"
+            ;;
+        pacman)
+            if [ "$PACMAN_DB_UPDATED" = false ]; then
+                pacman -Sy --noconfirm || return 1
+                PACMAN_DB_UPDATED=true
+            fi
+            pacman -S --noconfirm --needed "${packages[@]}"
+            ;;
+        *)
+            echo -e "${RED}未知的包管理器，无法安装依赖。${RESET}"
+            return 1
+            ;;
+    esac
+}
+
+# 设置运行用户和用户组
+set_service_user_group() {
+    SNELL_USER="nobody"
+    SNELL_GROUP="nogroup"
+
+    if command -v getent >/dev/null 2>&1; then
+        if ! getent group "$SNELL_GROUP" >/dev/null 2>&1; then
+            if getent group "$SNELL_USER" >/dev/null 2>&1; then
+                SNELL_GROUP="$SNELL_USER"
+            else
+                SNELL_GROUP="root"
+            fi
+        fi
+    else
+        SNELL_GROUP="$SNELL_USER"
+    fi
+}
+
+# 根据系统推断 iptables 规则文件路径
+determine_iptables_rules_path() {
+    if command -v pacman >/dev/null 2>&1; then
+        IPTABLES_RULES_PATH="/etc/iptables/iptables.rules"
+    elif [ -f "/etc/sysconfig/iptables" ]; then
+        IPTABLES_RULES_PATH="/etc/sysconfig/iptables"
+    else
+        IPTABLES_RULES_PATH="/etc/iptables/rules.v4"
+    fi
+}
+
+set_service_user_group
+determine_iptables_rules_path
+
 # 静默安装参数默认值
 AUTO_INSTALL=false
 AUTO_UNINSTALL=false
@@ -316,14 +411,8 @@ restore_snell_config() {
 check_bc() {
     if ! command -v bc &> /dev/null; then
         echo -e "${YELLOW}未检测到 bc，正在安装...${RESET}"
-        # 根据系统类型安装 bc
-        if [ -x "$(command -v apt)" ]; then
-            wait_for_apt
-            apt update && apt install -y bc
-        elif [ -x "$(command -v yum)" ]; then
-            yum install -y bc
-        else
-            echo -e "${RED}未支持的包管理器，无法安装 bc。请手动安装 bc。${RESET}"
+        if ! install_packages bc; then
+            echo -e "${RED}安装 bc 失败，请手动安装后重试。${RESET}"
             exit 1
         fi
     fi
@@ -333,13 +422,8 @@ check_bc() {
 check_curl() {
     if ! command -v curl &> /dev/null; then
         echo -e "${YELLOW}未检测到 curl，正在安装...${RESET}"
-        if [ -x "$(command -v apt)" ]; then
-            wait_for_apt
-            apt update && apt install -y curl
-        elif [ -x "$(command -v yum)" ]; then
-            yum install -y curl
-        else
-            echo -e "${RED}未支持的包管理器，无法安装 curl。请手动安装 curl。${RESET}"
+        if ! install_packages curl; then
+            echo -e "${RED}安装 curl 失败，请手动安装后重试。${RESET}"
             exit 1
         fi
     fi
@@ -374,7 +458,7 @@ check_and_migrate_config() {
             need_migration=true
             mkdir -p "${SNELL_CONF_DIR}/users"
             # 设置正确的目录权限
-            chown -R nobody:nogroup "${SNELL_CONF_DIR}"
+            chown -R "${SNELL_USER}:${SNELL_GROUP}" "${SNELL_CONF_DIR}"
             chmod -R 755 "${SNELL_CONF_DIR}"
         fi
     fi
@@ -397,7 +481,7 @@ check_and_migrate_config() {
             if [ -f "$OLD_SNELL_CONF_FILE" ]; then
                 cp "$OLD_SNELL_CONF_FILE" "${SNELL_CONF_FILE}"
                 # 设置正确的文件权限
-                chown nobody:nogroup "${SNELL_CONF_FILE}"
+                chown "${SNELL_USER}:${SNELL_GROUP}" "${SNELL_CONF_FILE}"
                 chmod 644 "${SNELL_CONF_FILE}"
                 echo -e "${GREEN}已迁移配置文件${RESET}"
             fi
@@ -511,14 +595,8 @@ fi
 check_jq() {
     if ! command -v jq &> /dev/null; then
         echo -e "${YELLOW}未检测到 jq，正在安装...${RESET}"
-        # 根据系统类型安装 jq
-        if [ -x "$(command -v apt)" ]; then
-            wait_for_apt
-            apt update && apt install -y jq
-        elif [ -x "$(command -v yum)" ]; then
-            yum install -y jq
-        else
-            echo -e "${RED}未支持的包管理器，无法安装 jq。请手动安装 jq。${RESET}"
+        if ! install_packages jq; then
+            echo -e "${RED}安装 jq 失败，请手动安装后重试。${RESET}"
             exit 1
         fi
     fi
@@ -649,12 +727,12 @@ open_port() {
         iptables -I INPUT -p tcp --dport "$PORT" -j ACCEPT
         
         # 创建 iptables 规则保存目录（如果不存在）
-        if [ ! -d "/etc/iptables" ]; then
-            mkdir -p /etc/iptables
-        fi
+        local rules_dir
+        rules_dir=$(dirname "$IPTABLES_RULES_PATH")
+        mkdir -p "$rules_dir"
         
         # 尝试保存规则，如果失败则不中断脚本
-        iptables-save > /etc/iptables/rules.v4 || true
+        iptables-save > "$IPTABLES_RULES_PATH" || true
     fi
 }
 
@@ -833,8 +911,10 @@ install_snell() {
     # 选择 Snell 版本
     select_snell_version
 
-    wait_for_apt
-    apt update && apt install -y wget unzip
+    if ! install_packages wget unzip; then
+        echo -e "${RED}安装 wget/unzip 失败，请手动安装依赖后重试。${RESET}"
+        exit 1
+    fi
 
     get_latest_snell_version
     ARCH=$(uname -m)
@@ -889,8 +969,8 @@ After=network.target
 
 [Service]
 Type=simple
-User=nobody
-Group=nogroup
+User=${SNELL_USER}
+Group=${SNELL_GROUP}
 LimitNOFILE=32768
 ExecStart=${INSTALL_DIR}/snell-server -c ${SNELL_CONF_FILE}
 AmbientCapabilities=CAP_NET_BIND_SERVICE
