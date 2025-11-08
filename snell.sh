@@ -13,6 +13,16 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 RESET='\033[0m'
 
+# 静默安装参数默认值
+AUTO_INSTALL=false
+AUTO_UNINSTALL=false
+AUTO_UNINSTALL_PORT=""
+AUTO_PORT=""
+AUTO_PSK=""
+AUTO_IPV6="false"
+AUTO_DNS_DEFAULT="1.1.1.1,1.0.0.1,8.8.8.8,8.8.4.4"
+AUTO_DNS="$AUTO_DNS_DEFAULT"
+
 #当前版本号
 current_version="4.6"
 
@@ -23,6 +33,11 @@ SNELL_VERSION=""
 # === 新增：版本选择函数 ===
 # 选择 Snell 版本
 select_snell_version() {
+    if [ "$AUTO_INSTALL" = true ]; then
+        SNELL_VERSION_CHOICE="v4"
+        echo -e "${GREEN}静默模式：已固定安装 Snell v4${RESET}"
+        return
+    fi
     echo -e "${CYAN}请选择要安装的 Snell 版本：${RESET}"
     echo -e "${GREEN}1.${RESET} Snell v4"
     echo -e "${GREEN}2.${RESET} Snell v5"
@@ -137,6 +152,109 @@ get_snell_download_url() {
                 exit 1
                 ;;
         esac
+    fi
+}
+
+print_usage() {
+    cat <<'EOF'
+用法: ./snell.sh [选项]
+  --silent-install        静默安装 Snell v4（无需交互）
+  --silent-uninstall      静默卸载 Snell（无需交互）
+  --uninstall-port <端口> 静默卸载指定端口的 Snell 服务
+  --port <端口>           设置 Snell 监听端口（必填，静默模式）
+  --psk <密钥>            设置 Snell PSK（必填，静默模式）
+  --ipv6 <true|false>     设置 IPv6 开关，静默模式默认 false
+  --dns <dns列表>         自定义 DNS，默认 1.1.1.1,1.0.0.1,8.8.8.8,8.8.4.4
+  -h, --help              显示此帮助信息
+EOF
+}
+
+parse_arguments() {
+    local positional=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --silent-install|--auto-install)
+                AUTO_INSTALL=true
+                shift
+                ;;
+            --silent-uninstall|--auto-uninstall)
+                AUTO_UNINSTALL=true
+                shift
+                ;;
+            --port)
+                AUTO_PORT="$2"
+                shift 2
+                ;;
+            --psk)
+                AUTO_PSK="$2"
+                shift 2
+                ;;
+            --uninstall-port)
+                AUTO_UNINSTALL_PORT="$2"
+                shift 2
+                ;;
+            --ipv6)
+                AUTO_IPV6="$(echo "$2" | tr '[:upper:]' '[:lower:]')"
+                shift 2
+                ;;
+            --dns)
+                AUTO_DNS="$2"
+                shift 2
+                ;;
+            -h|--help)
+                print_usage
+                exit 0
+                ;;
+            --)
+                shift
+                break
+                ;;
+            *)
+                positional+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    if [ "$AUTO_INSTALL" = true ]; then
+        if [ -z "$AUTO_PORT" ] || [ -z "$AUTO_PSK" ]; then
+            echo -e "${RED}静默安装需要同时指定 --port 与 --psk 参数。${RESET}"
+            exit 1
+        fi
+        if ! [[ "$AUTO_PORT" =~ ^[0-9]+$ ]] || [ "$AUTO_PORT" -lt 1 ] || [ "$AUTO_PORT" -gt 65535 ]; then
+            echo -e "${RED}端口号必须在 1-65535 之间。${RESET}"
+            exit 1
+        fi
+        case "$AUTO_IPV6" in
+            true|false) ;;
+            *)
+                echo -e "${RED}--ipv6 仅支持 true 或 false。${RESET}"
+                exit 1
+                ;;
+        esac
+        if [ -z "$AUTO_DNS" ]; then
+            AUTO_DNS="$AUTO_DNS_DEFAULT"
+        fi
+    fi
+
+    if [ -n "$AUTO_UNINSTALL_PORT" ]; then
+        if ! [[ "$AUTO_UNINSTALL_PORT" =~ ^[0-9]+$ ]] || [ "$AUTO_UNINSTALL_PORT" -lt 1 ] || [ "$AUTO_UNINSTALL_PORT" -gt 65535 ]; then
+            echo -e "${RED}--uninstall-port 参数必须是 1-65535 之间的端口号。${RESET}"
+            exit 1
+        fi
+    fi
+
+    if [ "$AUTO_INSTALL" = true ] && { [ "$AUTO_UNINSTALL" = true ] || [ -n "$AUTO_UNINSTALL_PORT" ]; }; then
+        echo -e "${RED}不能同时执行安装与卸载操作。${RESET}"
+        exit 1
+    fi
+    if [ "$AUTO_UNINSTALL" = true ] && [ -n "$AUTO_UNINSTALL_PORT" ]; then
+        echo -e "${RED}不能同时卸载全部和卸载指定端口。${RESET}"
+        exit 1
+    fi
+
+    if [ ${#positional[@]} -gt 0 ]; then
+        set -- "${positional[@]}"
     fi
 }
 
@@ -263,6 +381,10 @@ check_and_migrate_config() {
 
     # 如果需要迁移，询问用户
     if [ "$old_files_exist" = true ]; then
+        if [ "$AUTO_INSTALL" = true ] || [ "$AUTO_UNINSTALL" = true ]; then
+            echo -e "${YELLOW}检测到旧 Snell 配置，静默模式默认跳过迁移，请手动处理。${RESET}"
+            return
+        fi
         echo -e "\n${YELLOW}是否要迁移旧的配置文件？[y/N]${RESET}"
         read -r choice
         if [[ "$choice" == "y" || "$choice" == "Y" ]]; then
@@ -369,7 +491,21 @@ check_root() {
         exit 1
     fi
 }
+parse_arguments "$@"
 check_root
+
+if [ -n "$AUTO_UNINSTALL_PORT" ]; then
+    if uninstall_port_service "$AUTO_UNINSTALL_PORT" true; then
+        exit 0
+    else
+        exit 1
+    fi
+fi
+
+if [ "$AUTO_UNINSTALL" = true ]; then
+    uninstall_snell
+    exit 0
+fi
 
 # 检查 jq 是否安装
 check_jq() {
@@ -450,6 +586,11 @@ version_greater_equal() {
 
 # 用户输入端口号，范围 1-65535
 get_user_port() {
+    if [ "$AUTO_INSTALL" = true ]; then
+        PORT="$AUTO_PORT"
+        echo -e "${GREEN}静默模式：使用端口 $PORT${RESET}"
+        return
+    fi
     while true; do
         read -rp "请输入要使用的端口号 (1-65535): " PORT
         if [[ "$PORT" =~ ^[0-9]+$ ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ]; then
@@ -478,6 +619,11 @@ get_system_dns() {
 
 # 获取用户输入的 DNS 服务器
 get_dns() {
+    if [ "$AUTO_INSTALL" = true ]; then
+        DNS="$AUTO_DNS"
+        echo -e "${GREEN}静默模式：使用预设 DNS ${DNS}${RESET}"
+        return
+    fi
     read -rp "请输入 DNS 服务器地址 (直接回车使用系统DNS): " custom_dns
     if [ -z "$custom_dns" ]; then
         DNS=$(get_system_dns)
@@ -512,9 +658,177 @@ open_port() {
     fi
 }
 
+remove_existing_port_config() {
+    local target_port=$1
+    local removed_any=false
+
+    if [ -z "$target_port" ]; then
+        return
+    fi
+
+    if [ -d "${SNELL_CONF_DIR}/users" ]; then
+        for conf_file in "${SNELL_CONF_DIR}/users"/*.conf; do
+            [ -f "$conf_file" ] || continue
+            local conf_port
+            conf_port=$(grep -E '^listen' "$conf_file" | sed -n 's/.*::0:\([0-9]*\)/\1/p')
+            if [ "$conf_port" = "$target_port" ]; then
+                removed_any=true
+                if [ "$conf_file" = "$SNELL_CONF_FILE" ]; then
+                    systemctl stop snell 2>/dev/null
+                    echo -e "${YELLOW}检测到主配置已使用端口 ${target_port}，即将覆盖。${RESET}"
+                else
+                    local svc_name="snell-${target_port}"
+                    systemctl stop "$svc_name" 2>/dev/null
+                    systemctl disable "$svc_name" 2>/dev/null
+                    rm -f "${SYSTEMD_DIR}/${svc_name}.service"
+                    rm -f "$conf_file"
+                    echo -e "${YELLOW}已移除端口 ${target_port} 的多用户配置 ${conf_file}${RESET}"
+                fi
+            fi
+        done
+    fi
+
+    if [ "$removed_any" = false ]; then
+        echo -e "${CYAN}端口 ${target_port} 没有现有配置，将直接创建。${RESET}"
+    fi
+}
+
+uninstall_port_service() {
+    local target_port=$1
+    local quiet=${2:-false}
+
+    if [ -z "$target_port" ]; then
+        echo -e "${RED}未指定端口，无法卸载。${RESET}"
+        return 1
+    fi
+
+    if ! [[ "$target_port" =~ ^[0-9]+$ ]] || [ "$target_port" -lt 1 ] || [ "$target_port" -gt 65535 ]; then
+        echo -e "${RED}端口号必须在 1-65535 之间。${RESET}"
+        return 1
+    fi
+
+    if [ ! -d "${SNELL_CONF_DIR}/users" ]; then
+        echo -e "${YELLOW}未找到任何 Snell 用户配置目录。${RESET}"
+        return 1
+    fi
+
+    local target_conf=""
+    for conf_file in "${SNELL_CONF_DIR}/users"/*.conf; do
+        [ -f "$conf_file" ] || continue
+        local conf_port
+        conf_port=$(grep -E '^listen' "$conf_file" | sed -n 's/.*::0:\([0-9]*\)/\1/p')
+        if [ "$conf_port" = "$target_port" ]; then
+            target_conf="$conf_file"
+            break
+        fi
+    done
+
+    if [ -z "$target_conf" ]; then
+        echo -e "${YELLOW}未找到端口 ${target_port} 对应的 Snell 服务。${RESET}"
+        return 1
+    fi
+
+    if [ "$target_conf" = "$SNELL_CONF_FILE" ]; then
+        echo -e "${RED}端口 ${target_port} 是 Snell 主服务，无法通过此命令卸载。请使用完整卸载功能。${RESET}"
+        return 1
+    fi
+
+    local service_name="snell-${target_port}"
+    systemctl stop "$service_name" 2>/dev/null
+    systemctl disable "$service_name" 2>/dev/null
+    rm -f "${SYSTEMD_DIR}/${service_name}.service"
+    rm -f "$target_conf"
+    systemctl daemon-reload
+
+    echo -e "${GREEN}已成功卸载端口 ${target_port} 的 Snell 服务。${RESET}"
+    return 0
+}
+
+install_control_script() {
+    echo -e "${CYAN}正在安装管理脚本...${RESET}"
+    mkdir -p /usr/local/bin
+    cat > /usr/local/bin/snell << 'EOFSCRIPT'
+#!/bin/bash
+
+# 定义颜色代码
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+RESET='\033[0m'
+
+# 检查是否以 root 权限运行
+if [ "$(id -u)" != "0" ]; then
+    echo -e "${RED}请以 root 权限运行此脚本${RESET}"
+    exit 1
+fi
+
+# 下载并执行最新版本的脚本
+echo -e "${CYAN}正在获取最新版本的管理脚本...${RESET}"
+TMP_SCRIPT=$(mktemp)
+if curl -sL https://raw.githubusercontent.com/jinqians/snell.sh/main/snell.sh -o "$TMP_SCRIPT"; then
+    bash "$TMP_SCRIPT"
+    rm -f "$TMP_SCRIPT"
+else
+    echo -e "${RED}下载脚本失败，请检查网络连接。${RESET}"
+    rm -f "$TMP_SCRIPT"
+    exit 1
+fi
+EOFSCRIPT
+
+    if [ $? -eq 0 ]; then
+        chmod +x /usr/local/bin/snell
+        if [ $? -eq 0 ]; then
+            echo -e "\n${GREEN}管理脚本安装成功！${RESET}"
+            echo -e "${YELLOW}您可以在终端输入 'snell' 进入管理菜单。${RESET}"
+            echo -e "${YELLOW}注意：需要使用 sudo snell 或以 root 身份运行。${RESET}\n"
+        else
+            echo -e "\n${RED}设置脚本执行权限失败。${RESET}"
+            echo -e "${YELLOW}您可以通过直接运行原脚本来管理 Snell。${RESET}\n"
+        fi
+    else
+        echo -e "\n${RED}创建管理脚本失败。${RESET}"
+        echo -e "${YELLOW}您可以通过直接运行原脚本来管理 Snell。${RESET}\n"
+    fi
+}
+
 # 安装 Snell
 install_snell() {
     echo -e "${CYAN}正在安装 Snell${RESET}"
+
+    if check_snell_installed; then
+        if [ "$AUTO_INSTALL" = true ]; then
+            echo -e "${YELLOW}检测到 Snell 已安装，将根据提供的参数覆盖现有配置。${RESET}"
+        else
+            echo -e "${YELLOW}检测到系统已安装 Snell。${RESET}"
+            echo -e "${CYAN}请选择操作：${RESET}"
+            echo -e "${GREEN}1.${RESET} 重新安装并覆盖现有配置"
+            echo -e "${GREEN}2.${RESET} 仅更新控制脚本"
+            echo -e "${GREEN}3.${RESET} 取消${RESET}"
+            while true; do
+                read -rp "请选择 [1-3]: " reinstall_choice
+                case "$reinstall_choice" in
+                    1|"")
+                        echo -e "${YELLOW}将覆盖现有配置并重新安装。${RESET}"
+                        break
+                        ;;
+                    2)
+                        install_control_script
+                        echo -e "${GREEN}已更新控制脚本。${RESET}"
+                        return 0
+                        ;;
+                    3)
+                        echo -e "${CYAN}已取消操作。${RESET}"
+                        return 0
+                        ;;
+                    *)
+                        echo -e "${RED}请输入正确选项 [1-3]${RESET}"
+                        ;;
+                esac
+            done
+        fi
+        systemctl stop snell 2>/dev/null
+    fi
 
     # 选择 Snell 版本
     select_snell_version
@@ -546,8 +860,15 @@ install_snell() {
     chmod +x ${INSTALL_DIR}/snell-server
 
     get_user_port  # 获取用户输入的端口
+    remove_existing_port_config "$PORT"
     get_dns # 获取用户输入的 DNS 服务器
-    PSK=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 20)
+    if [ "$AUTO_INSTALL" = true ]; then
+        PSK="$AUTO_PSK"
+        IPV6_ENABLED="$AUTO_IPV6"
+    else
+        PSK=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 20)
+        IPV6_ENABLED="true"
+    fi
 
     # 创建用户配置目录
     mkdir -p ${SNELL_CONF_DIR}/users
@@ -557,7 +878,7 @@ install_snell() {
 [snell-server]
 listen = ::0:${PORT}
 psk = ${PSK}
-ipv6 = true
+ipv6 = ${IPV6_ENABLED}
 dns = ${DNS}
 EOF
 
@@ -607,7 +928,7 @@ EOF
     echo -e "${CYAN}--------------------------------${RESET}"
     echo -e "${YELLOW}监听端口: ${PORT}${RESET}"
     echo -e "${YELLOW}PSK 密钥: ${PSK}${RESET}"
-    echo -e "${YELLOW}IPv6: true${RESET}"
+    echo -e "${YELLOW}IPv6: ${IPV6_ENABLED}${RESET}"
     echo -e "${YELLOW}DNS 服务器: ${DNS}${RESET}"
     echo -e "${CYAN}--------------------------------${RESET}"
 
@@ -640,56 +961,7 @@ EOF
     fi
 
 
-    # 创建管理脚本
-    echo -e "${CYAN}正在安装管理脚本...${RESET}"
-    
-    # 确保目标目录存在
-    mkdir -p /usr/local/bin
-    
-    # 创建管理脚本
-    cat > /usr/local/bin/snell << 'EOFSCRIPT'
-#!/bin/bash
-
-# 定义颜色代码
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-RESET='\033[0m'
-
-# 检查是否以 root 权限运行
-if [ "$(id -u)" != "0" ]; then
-    echo -e "${RED}请以 root 权限运行此脚本${RESET}"
-    exit 1
-fi
-
-# 下载并执行最新版本的脚本
-echo -e "${CYAN}正在获取最新版本的管理脚本...${RESET}"
-TMP_SCRIPT=$(mktemp)
-if curl -sL https://raw.githubusercontent.com/jinqians/snell.sh/main/snell.sh -o "$TMP_SCRIPT"; then
-    bash "$TMP_SCRIPT"
-    rm -f "$TMP_SCRIPT"
-else
-    echo -e "${RED}下载脚本失败，请检查网络连接。${RESET}"
-    rm -f "$TMP_SCRIPT"
-    exit 1
-fi
-EOFSCRIPT
-    
-    if [ $? -eq 0 ]; then
-        chmod +x /usr/local/bin/snell
-        if [ $? -eq 0 ]; then
-            echo -e "\n${GREEN}管理脚本安装成功！${RESET}"
-            echo -e "${YELLOW}您可以在终端输入 'snell' 进入管理菜单。${RESET}"
-            echo -e "${YELLOW}注意：需要使用 sudo snell 或以 root 身份运行。${RESET}\n"
-        else
-            echo -e "\n${RED}设置脚本执行权限失败。${RESET}"
-            echo -e "${YELLOW}您可以通过直接运行原脚本来管理 Snell。${RESET}\n"
-        fi
-    else
-        echo -e "\n${RED}创建管理脚本失败。${RESET}"
-        echo -e "${YELLOW}您可以通过直接运行原脚本来管理 Snell。${RESET}\n"
-    fi
+    install_control_script
 }
 
 # 只更新 Snell 二进制文件，不覆盖配置
@@ -767,6 +1039,11 @@ update_snell_binary() {
 # 卸载 Snell
 uninstall_snell() {
     echo -e "${CYAN}正在卸载 Snell${RESET}"
+
+    if ! check_snell_installed && [ ! -d "${SNELL_CONF_DIR}" ]; then
+        echo -e "${YELLOW}未检测到 Snell 安装，跳过卸载操作。${RESET}"
+        return 0
+    fi
 
     # 停止并禁用主服务
     systemctl stop snell
@@ -1333,6 +1610,11 @@ initial_check() {
 # 运行初始检查
 initial_check
 
+if [ "$AUTO_INSTALL" = true ]; then
+    install_snell
+    exit 0
+fi
+
 # 多用户管理
 setup_multi_user() {
     echo -e "${CYAN}正在执行多用户管理脚本...${RESET}"
@@ -1371,10 +1653,11 @@ show_menu() {
     echo -e "${GREEN}8.${RESET} 更新Snell"
     echo -e "${GREEN}9.${RESET} 更新脚本"
     echo -e "${GREEN}10.${RESET} 查看服务状态"
+    echo -e "${GREEN}11.${RESET} 卸载指定端口"
     echo -e "${GREEN}0.${RESET} 退出脚本"
     
     echo -e "${CYAN}============================================${RESET}"
-    read -rp "请输入选项 [0-10]: " num
+    read -rp "请输入选项 [0-11]: " num
 }
 
 #开启bbr
@@ -1397,6 +1680,15 @@ setup_shadowtls() {
     # ShadowTLS 脚本执行完毕后会自动返回这里
     echo -e "${GREEN}ShadowTLS 管理操作完成${RESET}"
     sleep 1  # 给用户一点时间看到提示
+}
+
+uninstall_port_prompt() {
+    read -rp "请输入要卸载的端口: " target_port
+    if [ -z "$target_port" ]; then
+        echo -e "${RED}未输入端口，操作已取消。${RESET}"
+        return 1
+    fi
+    uninstall_port_service "$target_port"
 }
 
 # 获取 Snell 端口
@@ -1471,12 +1763,15 @@ while true; do
             check_and_show_status
             read -p "按任意键继续..."
             ;;
+        11)
+            uninstall_port_prompt
+            ;;
         0)
             echo -e "${GREEN}感谢使用，再见！${RESET}"
             exit 0
             ;;
         *)
-            echo -e "${RED}请输入正确的选项 [0-10]${RESET}"
+            echo -e "${RED}请输入正确的选项 [0-11]${RESET}"
             ;;
     esac
     echo -e "\n${CYAN}按任意键返回主菜单...${RESET}"
