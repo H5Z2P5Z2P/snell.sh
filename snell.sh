@@ -771,6 +771,140 @@ remove_existing_port_config() {
     fi
 }
 
+ensure_snell_binary_installed() {
+    if command -v snell-server &> /dev/null; then
+        return
+    fi
+
+    echo -e "${CYAN}未检测到 Snell 二进制，正在执行基础安装...${RESET}"
+
+    SNELL_VERSION_CHOICE="v4"
+    if [ -x "$(command -v apt)" ]; then
+        wait_for_apt
+        apt update >/dev/null 2>&1
+        apt install -y wget unzip >/dev/null 2>&1
+    elif [ -x "$(command -v yum)" ]; then
+        yum install -y wget unzip >/dev/null 2>&1
+    else
+        echo -e "${RED}未检测到受支持的包管理器，无法安装依赖。${RESET}"
+        exit 1
+    fi
+
+    get_latest_snell_version
+    local SNELL_URL
+    SNELL_URL=$(get_snell_download_url "$SNELL_VERSION_CHOICE")
+
+    echo -e "${CYAN}下载 Snell ${SNELL_VERSION_CHOICE} (${SNELL_VERSION})...${RESET}"
+    wget -q ${SNELL_URL} -O snell-server.zip
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}下载 Snell 失败，请检查网络连接。${RESET}"
+        exit 1
+    fi
+
+    unzip -qo snell-server.zip -d ${INSTALL_DIR}
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}解压 Snell 失败。${RESET}"
+        exit 1
+    fi
+
+    rm -f snell-server.zip
+    chmod +x ${INSTALL_DIR}/snell-server
+    mkdir -p "${SNELL_CONF_DIR}/users"
+
+    echo -e "${GREEN}Snell 二进制已准备完成。${RESET}"
+}
+
+ensure_control_script_installed() {
+    if [ ! -x /usr/local/bin/snell ]; then
+        install_control_script
+    fi
+}
+
+silent_apply_port_config() {
+    local target_port=$1
+    local target_psk=$2
+    local target_ipv6=$3
+    local target_dns=$4
+
+    mkdir -p "${SNELL_CONF_DIR}/users"
+
+    local main_conf_exists=false
+    local main_port=""
+    if [ -f "${SNELL_CONF_FILE}" ]; then
+        main_conf_exists=true
+        main_port=$(grep -E '^listen' "${SNELL_CONF_FILE}" | sed -n 's/.*::0:\([0-9]*\)/\1/p')
+    fi
+
+    if [ "$main_conf_exists" = true ] && [ "$target_port" = "$main_port" ]; then
+        cat > ${SNELL_CONF_FILE} << EOF
+[snell-server]
+listen = ::0:${target_port}
+psk = ${target_psk}
+ipv6 = ${target_ipv6}
+dns = ${target_dns}
+EOF
+        if systemctl list-unit-files | grep -q '^snell.service'; then
+            systemctl restart snell
+        fi
+        open_port "$target_port"
+        echo -e "${GREEN}已更新主 Snell 服务 (端口 ${target_port}) 的配置。${RESET}"
+        echo -e "${YELLOW}PSK: ${target_psk}${RESET}"
+        echo -e "${YELLOW}IPv6: ${target_ipv6}${RESET}"
+        echo -e "${YELLOW}DNS: ${target_dns}${RESET}"
+        return 0
+    fi
+
+    local user_conf="${SNELL_CONF_DIR}/users/snell-${target_port}.conf"
+    local service_name="snell-${target_port}"
+    local service_file="${SYSTEMD_DIR}/${service_name}.service"
+    local existed=false
+    if [ -f "$user_conf" ] || [ -f "$service_file" ]; then
+        existed=true
+    fi
+
+    cat > "$user_conf" << EOF
+[snell-server]
+listen = ::0:${target_port}
+psk = ${target_psk}
+ipv6 = ${target_ipv6}
+dns = ${target_dns}
+EOF
+
+    cat > "$service_file" << EOF
+[Unit]
+Description=Snell Proxy Service (Port ${target_port})
+After=network.target
+
+[Service]
+Type=simple
+User=nobody
+Group=nogroup
+LimitNOFILE=32768
+ExecStart=${INSTALL_DIR}/snell-server -c ${user_conf}
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=snell-server-${target_port}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable "$service_name" >/dev/null 2>&1
+    systemctl restart "$service_name"
+    open_port "$target_port"
+
+    if [ "$existed" = true ]; then
+        echo -e "${GREEN}已更新端口 ${target_port} 的 Snell 多用户配置。${RESET}"
+    else
+        echo -e "${GREEN}已新增端口 ${target_port} 的 Snell 多用户配置。${RESET}"
+    fi
+    echo -e "${YELLOW}PSK: ${target_psk}${RESET}"
+    echo -e "${YELLOW}IPv6: ${target_ipv6}${RESET}"
+    echo -e "${YELLOW}DNS: ${target_dns}${RESET}"
+}
+
 uninstall_port_service() {
     local target_port=$1
     local quiet=${2:-false}
@@ -874,37 +1008,46 @@ EOFSCRIPT
 install_snell() {
     echo -e "${CYAN}正在安装 Snell${RESET}"
 
+    if [ "$AUTO_INSTALL" = true ]; then
+        ensure_snell_binary_installed
+
+        PORT="$AUTO_PORT"
+        DNS="$AUTO_DNS"
+        PSK="$AUTO_PSK"
+        IPV6_ENABLED="$AUTO_IPV6"
+
+        silent_apply_port_config "$PORT" "$PSK" "$IPV6_ENABLED" "$DNS"
+        ensure_control_script_installed
+        return 0
+    fi
+
     if check_snell_installed; then
-        if [ "$AUTO_INSTALL" = true ]; then
-            echo -e "${YELLOW}检测到 Snell 已安装，将根据提供的参数覆盖现有配置。${RESET}"
-        else
-            echo -e "${YELLOW}检测到系统已安装 Snell。${RESET}"
-            echo -e "${CYAN}请选择操作：${RESET}"
-            echo -e "${GREEN}1.${RESET} 重新安装并覆盖现有配置"
-            echo -e "${GREEN}2.${RESET} 仅更新控制脚本"
-            echo -e "${GREEN}3.${RESET} 取消${RESET}"
-            while true; do
-                read -rp "请选择 [1-3]: " reinstall_choice
-                case "$reinstall_choice" in
-                    1|"")
-                        echo -e "${YELLOW}将覆盖现有配置并重新安装。${RESET}"
-                        break
-                        ;;
-                    2)
-                        install_control_script
-                        echo -e "${GREEN}已更新控制脚本。${RESET}"
-                        return 0
-                        ;;
-                    3)
-                        echo -e "${CYAN}已取消操作。${RESET}"
-                        return 0
-                        ;;
-                    *)
-                        echo -e "${RED}请输入正确选项 [1-3]${RESET}"
-                        ;;
-                esac
-            done
-        fi
+        echo -e "${YELLOW}检测到系统已安装 Snell。${RESET}"
+        echo -e "${CYAN}请选择操作：${RESET}"
+        echo -e "${GREEN}1.${RESET} 重新安装并覆盖现有配置"
+        echo -e "${GREEN}2.${RESET} 仅更新控制脚本"
+        echo -e "${GREEN}3.${RESET} 取消${RESET}"
+        while true; do
+            read -rp "请选择 [1-3]: " reinstall_choice
+            case "$reinstall_choice" in
+                1|"")
+                    echo -e "${YELLOW}将覆盖现有配置并重新安装。${RESET}"
+                    break
+                    ;;
+                2)
+                    install_control_script
+                    echo -e "${GREEN}已更新控制脚本。${RESET}"
+                    return 0
+                    ;;
+                3)
+                    echo -e "${CYAN}已取消操作。${RESET}"
+                    return 0
+                    ;;
+                *)
+                    echo -e "${RED}请输入正确选项 [1-3]${RESET}"
+                    ;;
+            esac
+        done
         systemctl stop snell 2>/dev/null
     fi
 
@@ -942,13 +1085,8 @@ install_snell() {
     get_user_port  # 获取用户输入的端口
     remove_existing_port_config "$PORT"
     get_dns # 获取用户输入的 DNS 服务器
-    if [ "$AUTO_INSTALL" = true ]; then
-        PSK="$AUTO_PSK"
-        IPV6_ENABLED="$AUTO_IPV6"
-    else
-        PSK=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 20)
-        IPV6_ENABLED="true"
-    fi
+    PSK=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 20)
+    IPV6_ENABLED="true"
 
     # 创建用户配置目录
     mkdir -p ${SNELL_CONF_DIR}/users
@@ -1126,8 +1264,10 @@ uninstall_snell() {
     fi
 
     # 停止并禁用主服务
-    systemctl stop snell
-    systemctl disable snell
+    if systemctl list-unit-files | grep -q '^snell.service'; then
+        systemctl stop snell 2>/dev/null
+        systemctl disable snell 2>/dev/null
+    fi
 
     # 停止并禁用所有多用户服务
     if [ -d "${SNELL_CONF_DIR}/users" ]; then
@@ -1200,25 +1340,32 @@ check_and_show_status() {
         local total_snell_memory=0
         local total_snell_cpu=0
         
+        local main_service_exists=false
+        if systemctl list-unit-files | grep -q '^snell.service'; then
+            main_service_exists=true
+        fi
+
         # 检查主服务状态
-        if systemctl is-active snell &> /dev/null; then
-            user_count=$((user_count + 1))
-            running_count=$((running_count + 1))
-            
-            # 获取主服务资源使用情况
-            local main_pid=$(systemctl show -p MainPID snell | cut -d'=' -f2)
-            if [ ! -z "$main_pid" ] && [ "$main_pid" != "0" ]; then
-                local mem=$(ps -o rss= -p $main_pid 2>/dev/null)
-                local cpu=$(ps -o %cpu= -p $main_pid 2>/dev/null)
-                if [ ! -z "$mem" ]; then
-                    total_snell_memory=$((total_snell_memory + mem))
+        if [ "$main_service_exists" = true ]; then
+            if systemctl is-active snell &> /dev/null; then
+                user_count=$((user_count + 1))
+                running_count=$((running_count + 1))
+                
+                # 获取主服务资源使用情况
+                local main_pid=$(systemctl show -p MainPID snell | cut -d'=' -f2)
+                if [ ! -z "$main_pid" ] && [ "$main_pid" != "0" ]; then
+                    local mem=$(ps -o rss= -p $main_pid 2>/dev/null)
+                    local cpu=$(ps -o %cpu= -p $main_pid 2>/dev/null)
+                    if [ ! -z "$mem" ]; then
+                        total_snell_memory=$((total_snell_memory + mem))
+                    fi
+                    if [ ! -z "$cpu" ]; then
+                        total_snell_cpu=$(echo "$total_snell_cpu + $cpu" | bc -l)
+                    fi
                 fi
-                if [ ! -z "$cpu" ]; then
-                    total_snell_cpu=$(echo "$total_snell_cpu + $cpu" | bc -l)
-                fi
+            else
+                user_count=$((user_count + 1))
             fi
-        else
-            user_count=$((user_count + 1))
         fi
         
         # 检查多用户状态
