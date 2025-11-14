@@ -105,6 +105,17 @@ determine_iptables_rules_path() {
     fi
 }
 
+is_numeric() {
+    case "$1" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
 set_service_user_group
 determine_iptables_rules_path
 
@@ -257,7 +268,7 @@ print_usage() {
   --silent-uninstall      静默卸载 Snell（无需交互）
   --uninstall-port <端口> 静默卸载指定端口的 Snell 服务
   --port <端口>           设置 Snell 监听端口（必填，静默模式）
-  --psk <密钥>            设置 Snell PSK（必填，静默模式）
+  --psk <密钥>            设置 Snell PSK（省略则自动生成）
   --ipv6 <true|false>     设置 IPv6 开关，静默模式默认 false
   --dns <dns列表>         自定义 DNS，默认 1.1.1.1,1.0.0.1,8.8.8.8,8.8.4.4
   -h, --help              显示此帮助信息
@@ -266,7 +277,7 @@ EOF
 
 parse_arguments() {
     local positional=()
-    while [[ $# -gt 0 ]]; do
+    while [ $# -gt 0 ]; do
         case "$1" in
             --silent-install|--auto-install)
                 AUTO_INSTALL=true
@@ -312,11 +323,11 @@ parse_arguments() {
     done
 
     if [ "$AUTO_INSTALL" = true ]; then
-        if [ -z "$AUTO_PORT" ] || [ -z "$AUTO_PSK" ]; then
-            echo -e "${RED}静默安装需要同时指定 --port 与 --psk 参数。${RESET}"
+        if [ -z "$AUTO_PORT" ]; then
+            echo -e "${RED}静默安装需要指定 --port 参数。${RESET}"
             exit 1
         fi
-        if ! [[ "$AUTO_PORT" =~ ^[0-9]+$ ]] || [ "$AUTO_PORT" -lt 1 ] || [ "$AUTO_PORT" -gt 65535 ]; then
+        if ! is_numeric "$AUTO_PORT" || [ "$AUTO_PORT" -lt 1 ] || [ "$AUTO_PORT" -gt 65535 ]; then
             echo -e "${RED}端口号必须在 1-65535 之间。${RESET}"
             exit 1
         fi
@@ -333,7 +344,7 @@ parse_arguments() {
     fi
 
     if [ -n "$AUTO_UNINSTALL_PORT" ]; then
-        if ! [[ "$AUTO_UNINSTALL_PORT" =~ ^[0-9]+$ ]] || [ "$AUTO_UNINSTALL_PORT" -lt 1 ] || [ "$AUTO_UNINSTALL_PORT" -gt 65535 ]; then
+        if ! is_numeric "$AUTO_UNINSTALL_PORT" || [ "$AUTO_UNINSTALL_PORT" -lt 1 ] || [ "$AUTO_UNINSTALL_PORT" -gt 65535 ]; then
             echo -e "${RED}--uninstall-port 参数必须是 1-65535 之间的端口号。${RESET}"
             exit 1
         fi
@@ -471,7 +482,7 @@ check_and_migrate_config() {
         fi
         echo -e "\n${YELLOW}是否要迁移旧的配置文件？[y/N]${RESET}"
         read -r choice
-        if [[ "$choice" == "y" || "$choice" == "Y" ]]; then
+        if [ "$choice" = "y" ] || [ "$choice" = "Y" ]; then
             echo -e "${CYAN}开始迁移配置文件...${RESET}"
             
             # 停止服务
@@ -497,7 +508,7 @@ check_and_migrate_config() {
             # 询问是否删除旧文件
             echo -e "${YELLOW}是否删除旧的配置文件？[y/N]${RESET}"
             read -r del_choice
-            if [[ "$del_choice" == "y" || "$del_choice" == "Y" ]]; then
+            if [ "$del_choice" = "y" ] || [ "$del_choice" = "Y" ]; then
                 [ -f "$OLD_SNELL_CONF_FILE" ] && rm -f "$OLD_SNELL_CONF_FILE"
                 [ -f "$OLD_SYSTEMD_SERVICE_FILE" ] && rm -f "$OLD_SYSTEMD_SERVICE_FILE"
                 echo -e "${GREEN}已删除旧的配置文件${RESET}"
@@ -578,19 +589,6 @@ check_root() {
 parse_arguments "$@"
 check_root
 
-if [ -n "$AUTO_UNINSTALL_PORT" ]; then
-    if uninstall_port_service "$AUTO_UNINSTALL_PORT" true; then
-        exit 0
-    else
-        exit 1
-    fi
-fi
-
-if [ "$AUTO_UNINSTALL" = true ]; then
-    uninstall_snell
-    exit 0
-fi
-
 # 检查 jq 是否安装
 check_jq() {
     if ! command -v jq &> /dev/null; then
@@ -644,7 +642,7 @@ version_greater_equal() {
         local val2=${VER2[i]:-0}
         
         # 如果是数字，直接比较
-        if [[ "$val1" =~ ^[0-9]+$ ]] && [[ "$val2" =~ ^[0-9]+$ ]]; then
+        if is_numeric "$val1" && is_numeric "$val2"; then
             if [ "$val1" -gt "$val2" ]; then
                 return 0
             elif [ "$val1" -lt "$val2" ]; then
@@ -652,9 +650,9 @@ version_greater_equal() {
             fi
         else
             # 如果是字符串（如 beta 版本），按字典序比较
-            if [[ "$val1" > "$val2" ]]; then
+            if [ "$val1" \> "$val2" ]; then
                 return 0
-            elif [[ "$val1" < "$val2" ]]; then
+            elif [ "$val1" \< "$val2" ]; then
                 return 1
             fi
         fi
@@ -671,7 +669,7 @@ get_user_port() {
     fi
     while true; do
         read -rp "请输入要使用的端口号 (1-65535): " PORT
-        if [[ "$PORT" =~ ^[0-9]+$ ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ]; then
+        if is_numeric "$PORT" && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ]; then
             echo -e "${GREEN}已选择端口: $PORT${RESET}"
             break
         else
@@ -710,6 +708,10 @@ get_dns() {
         DNS=$custom_dns
         echo -e "${GREEN}使用自定义 DNS 服务器: $DNS${RESET}"
     fi
+}
+
+generate_random_psk() {
+    tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20
 }
 
 # 开放端口 (ufw 和 iptables)
@@ -905,6 +907,26 @@ EOF
     echo -e "${YELLOW}DNS: ${target_dns}${RESET}"
 }
 
+find_snell_conf_by_port() {
+    local port=$1
+    local search_dirs=()
+    [ -d "${SNELL_CONF_DIR}" ] && search_dirs+=("${SNELL_CONF_DIR}")
+    [ -d "${SNELL_CONF_DIR}/users" ] && search_dirs+=("${SNELL_CONF_DIR}/users")
+
+    for dir in "${search_dirs[@]}"; do
+        for conf_file in "$dir"/snell*.conf "$dir"/snell-server.conf; do
+            [ -f "$conf_file" ] || continue
+            local conf_port
+            conf_port=$(grep -E '^listen' "$conf_file" | sed -n 's/.*::0:\([0-9]*\)/\1/p')
+            if [ "$conf_port" = "$port" ]; then
+                echo "$conf_file"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
 uninstall_port_service() {
     local target_port=$1
     local quiet=${2:-false}
@@ -914,45 +936,35 @@ uninstall_port_service() {
         return 1
     fi
 
-    if ! [[ "$target_port" =~ ^[0-9]+$ ]] || [ "$target_port" -lt 1 ] || [ "$target_port" -gt 65535 ]; then
+    if ! is_numeric "$target_port" || [ "$target_port" -lt 1 ] || [ "$target_port" -gt 65535 ]; then
         echo -e "${RED}端口号必须在 1-65535 之间。${RESET}"
         return 1
     fi
 
-    if [ ! -d "${SNELL_CONF_DIR}/users" ]; then
-        echo -e "${YELLOW}未找到任何 Snell 用户配置目录。${RESET}"
-        return 1
-    fi
-
-    local target_conf=""
-    for conf_file in "${SNELL_CONF_DIR}/users"/*.conf; do
-        [ -f "$conf_file" ] || continue
-        local conf_port
-        conf_port=$(grep -E '^listen' "$conf_file" | sed -n 's/.*::0:\([0-9]*\)/\1/p')
-        if [ "$conf_port" = "$target_port" ]; then
-            target_conf="$conf_file"
-            break
-        fi
-    done
-
-    if [ -z "$target_conf" ]; then
-        echo -e "${YELLOW}未找到端口 ${target_port} 对应的 Snell 服务。${RESET}"
-        return 1
-    fi
-
-    if [ "$target_conf" = "$SNELL_CONF_FILE" ]; then
-        echo -e "${RED}端口 ${target_port} 是 Snell 主服务，无法通过此命令卸载。请使用完整卸载功能。${RESET}"
+    local target_conf
+    if ! target_conf=$(find_snell_conf_by_port "$target_port"); then
+        echo -e "${YELLOW}未找到端口 ${target_port} 对应的 Snell 配置文件。${RESET}"
         return 1
     fi
 
     local service_name="snell-${target_port}"
+    local is_main=false
+    if [ "$target_conf" = "$SNELL_CONF_FILE" ] || [ "$target_conf" = "${SNELL_CONF_DIR}/snell-main.conf" ] || [ "$target_conf" = "${SNELL_CONF_DIR}/snell-server.conf" ]; then
+        is_main=true
+        service_name="snell"
+    fi
+
     systemctl stop "$service_name" 2>/dev/null
     systemctl disable "$service_name" 2>/dev/null
-    rm -f "${SYSTEMD_DIR}/${service_name}.service"
+    rm -f "${SYSTEMD_DIR}/${service_name}.service" "/lib/systemd/system/${service_name}.service"
     rm -f "$target_conf"
     systemctl daemon-reload
 
-    echo -e "${GREEN}已成功卸载端口 ${target_port} 的 Snell 服务。${RESET}"
+    if [ "$is_main" = true ]; then
+        echo -e "${GREEN}已移除主 Snell 服务 (端口 ${target_port}) 配置。${RESET}"
+    else
+        echo -e "${GREEN}已成功卸载端口 ${target_port} 的 Snell 服务。${RESET}"
+    fi
     return 0
 }
 
@@ -1015,6 +1027,11 @@ install_snell() {
         DNS="$AUTO_DNS"
         PSK="$AUTO_PSK"
         IPV6_ENABLED="$AUTO_IPV6"
+
+        if [ -z "$PSK" ]; then
+            PSK=$(generate_random_psk)
+            echo -e "${YELLOW}未指定 PSK，已自动生成随机密钥：${PSK}${RESET}"
+        fi
 
         silent_apply_port_config "$PORT" "$PSK" "$IPV6_ENABLED" "$DNS"
         ensure_control_script_installed
@@ -1085,7 +1102,7 @@ install_snell() {
     get_user_port  # 获取用户输入的端口
     remove_existing_port_config "$PORT"
     get_dns # 获取用户输入的 DNS 服务器
-    PSK=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 20)
+    PSK=$(generate_random_psk)
     IPV6_ENABLED="true"
 
     # 创建用户配置目录
@@ -1236,7 +1253,10 @@ update_snell_binary() {
     # 重启所有多用户服务
     if [ -d "${SNELL_CONF_DIR}/users" ]; then
         for user_conf in "${SNELL_CONF_DIR}/users"/*; do
-            if [ -f "$user_conf" ] && [[ "$user_conf" != *"snell-main.conf" ]]; then
+            if [ -f "$user_conf" ]; then
+                case "$user_conf" in
+                    *snell-main.conf) continue ;;
+                esac
                 local port=$(grep -E '^listen' "$user_conf" | sed -n 's/.*::0:\([0-9]*\)/\1/p')
                 if [ ! -z "$port" ]; then
                     systemctl restart "snell-${port}" 2>/dev/null
@@ -1313,7 +1333,10 @@ restart_snell() {
     # 重启所有多用户服务
     if [ -d "${SNELL_CONF_DIR}/users" ]; then
         for user_conf in "${SNELL_CONF_DIR}/users"/*; do
-            if [ -f "$user_conf" ] && [[ "$user_conf" != *"snell-main.conf" ]]; then
+            if [ -f "$user_conf" ]; then
+                case "$user_conf" in
+                    *snell-main.conf) continue ;;
+                esac
                 local port=$(grep -E '^listen' "$user_conf" | sed -n 's/.*::0:\([0-9]*\)/\1/p')
                 if [ ! -z "$port" ]; then
                     echo -e "${YELLOW}正在重启用户服务 (端口: $port)${RESET}"
@@ -1370,10 +1393,13 @@ check_and_show_status() {
         
         # 检查多用户状态
         if [ -d "${SNELL_CONF_DIR}/users" ]; then
-            for user_conf in "${SNELL_CONF_DIR}/users"/*; do
-                if [ -f "$user_conf" ] && [[ "$user_conf" != *"snell-main.conf" ]]; then
-                    local port=$(grep -E '^listen' "$user_conf" | sed -n 's/.*::0:\([0-9]*\)/\1/p')
-                    if [ ! -z "$port" ]; then
+        for user_conf in "${SNELL_CONF_DIR}/users"/*; do
+            if [ -f "$user_conf" ]; then
+                case "$user_conf" in
+                    *snell-main.conf) continue ;;
+                esac
+                local port=$(grep -E '^listen' "$user_conf" | sed -n 's/.*::0:\([0-9]*\)/\1/p')
+                if [ ! -z "$port" ]; then
                         user_count=$((user_count + 1))
                         if systemctl is-active --quiet "snell-${port}"; then
                             running_count=$((running_count + 1))
@@ -1515,7 +1541,10 @@ view_snell_config() {
     # 显示其他用户配置
     if [ -d "${SNELL_CONF_DIR}/users" ]; then
         for user_conf in "${SNELL_CONF_DIR}/users"/*; do
-            if [ -f "$user_conf" ] && [[ "$user_conf" != *"snell-main.conf" ]]; then
+            if [ -f "$user_conf" ]; then
+                case "$user_conf" in
+                    *snell-main.conf) continue ;;
+                esac
                 local user_port=$(grep -E '^listen' "$user_conf" | sed -n 's/.*::0:\([0-9]*\)/\1/p')
                 local user_psk=$(grep -E '^psk' "$user_conf" | awk -F'=' '{print $2}' | tr -d ' ')
                 local user_ipv6=$(grep -E '^ipv6' "$user_conf" | awk -F'=' '{print $2}' | tr -d ' ')
@@ -1686,7 +1715,7 @@ check_snell_update() {
         echo -e "${GREEN}✓ 配置文件会自动备份${RESET}"
         echo -e "${CYAN}是否更新 Snell? [y/N]${RESET}"
         read -r choice
-        if [[ "$choice" == "y" || "$choice" == "Y" ]]; then
+        if [ "$choice" = "y" ] || [ "$choice" = "Y" ]; then
             update_snell_binary
         else
             echo -e "${CYAN}已取消更新。${RESET}"
@@ -1739,7 +1768,7 @@ update_script() {
         if [ "$new_version" != "$current_version" ]; then
             echo -e "${CYAN}是否更新到新版本？[y/N]${RESET}"
             read -r choice
-            if [[ "$choice" == "y" || "$choice" == "Y" ]]; then
+            if [ "$choice" = "y" ] || [ "$choice" = "Y" ]; then
                 # 获取当前脚本的完整路径
                 SCRIPT_PATH=$(readlink -f "$0")
                 
@@ -1817,14 +1846,6 @@ get_shadowtls_config() {
     return 0
 }
 
-# 检查是否以 root 权限运行
-check_root() {
-    if [ "$(id -u)" != "0" ]; then
-        echo -e "${RED}请以 root 权限运行此脚本${RESET}"
-        exit 1
-    fi
-}
-
 # 初始检查
 initial_check() {
     check_root
@@ -1833,6 +1854,19 @@ initial_check() {
     check_and_migrate_config
     check_and_show_status
 }
+
+if [ -n "$AUTO_UNINSTALL_PORT" ]; then
+    if uninstall_port_service "$AUTO_UNINSTALL_PORT" true; then
+        exit 0
+    else
+        exit 1
+    fi
+fi
+
+if [ "$AUTO_UNINSTALL" = true ]; then
+    uninstall_snell
+    exit 0
+fi
 
 # 运行初始检查
 initial_check
@@ -1944,10 +1978,13 @@ get_all_snell_users() {
     fi
     
     # 获取其他用户配置
-    for user_conf in "${SNELL_CONF_DIR}/users"/snell-*.conf; do
-        if [ -f "$user_conf" ] && [[ "$user_conf" != *"snell-main.conf" ]]; then
-            local port=$(grep -E '^listen' "$user_conf" | sed -n 's/.*::0:\([0-9]*\)/\1/p')
-            local psk=$(grep -E '^psk' "$user_conf" | awk -F'=' '{print $2}' | tr -d ' ')
+        for user_conf in "${SNELL_CONF_DIR}/users"/snell-*.conf; do
+            if [ -f "$user_conf" ]; then
+                case "$user_conf" in
+                    *snell-main.conf) continue ;;
+                esac
+                local port=$(grep -E '^listen' "$user_conf" | sed -n 's/.*::0:\([0-9]*\)/\1/p')
+                local psk=$(grep -E '^psk' "$user_conf" | awk -F'=' '{print $2}' | tr -d ' ')
             if [ ! -z "$port" ] && [ ! -z "$psk" ]; then
                 echo "${port}|${psk}"
             fi
