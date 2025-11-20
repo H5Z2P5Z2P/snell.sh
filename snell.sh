@@ -123,6 +123,7 @@ determine_iptables_rules_path
 AUTO_INSTALL=false
 AUTO_UNINSTALL=false
 AUTO_UNINSTALL_PORT=""
+AUTO_UPDATE=false
 AUTO_PORT=""
 AUTO_PSK=""
 AUTO_IPV6="false"
@@ -133,39 +134,18 @@ AUTO_DNS="$AUTO_DNS_DEFAULT"
 current_version="4.6"
 
 # 全局变量：选择的 Snell 版本
-SNELL_VERSION_CHOICE=""
+SNELL_VERSION_CHOICE="v5"
 SNELL_VERSION=""
 
 # === 新增：版本选择函数 ===
 # 选择 Snell 版本
 select_snell_version() {
+    SNELL_VERSION_CHOICE="v5"
     if [ "$AUTO_INSTALL" = true ]; then
-        SNELL_VERSION_CHOICE="v4"
-        echo -e "${GREEN}静默模式：已固定安装 Snell v4${RESET}"
-        return
+        echo -e "${GREEN}静默模式：Snell v5 已默认启用，并且兼容 v4 客户端配置。${RESET}"
+    else
+        echo -e "${GREEN}Snell v5 与 v4 客户端兼容，已默认选择 Snell v5。${RESET}"
     fi
-    echo -e "${CYAN}请选择要安装的 Snell 版本：${RESET}"
-    echo -e "${GREEN}1.${RESET} Snell v4"
-    echo -e "${GREEN}2.${RESET} Snell v5"
-    
-    while true; do
-        read -rp "请输入选项 [1-2]: " version_choice
-        case "$version_choice" in
-            1)
-                SNELL_VERSION_CHOICE="v4"
-                echo -e "${GREEN}已选择 Snell v4${RESET}"
-                break
-                ;;
-            2)
-                SNELL_VERSION_CHOICE="v5"
-                echo -e "${GREEN}已选择 Snell v5${RESET}"
-                break
-                ;;
-            *)
-                echo -e "${RED}请输入正确的选项 [1-2]${RESET}"
-                ;;
-        esac
-    done
 }
 
 # 获取 Snell v4 最新版本
@@ -217,7 +197,7 @@ get_latest_snell_version() {
 get_snell_download_url() {
     local version=$1
     local arch=$(uname -m)
-    
+
     if [ "$version" = "v5" ]; then
         # v5 版本自动拼接下载链接
         case ${arch} in
@@ -264,8 +244,9 @@ get_snell_download_url() {
 print_usage() {
     cat <<'EOF'
 用法: ./snell.sh [选项]
-  --silent-install        静默安装 Snell v4（无需交互）
+  --silent-install        静默安装 Snell v5（兼容 v4 客户端，无需交互）
   --silent-uninstall      静默卸载 Snell（无需交互）
+  --silent-update         静默更新 Snell v5（无需交互）
   --uninstall-port <端口> 静默卸载指定端口的 Snell 服务
   --port <端口>           设置 Snell 监听端口（必填，静默模式）
   --psk <密钥>            设置 Snell PSK（省略则自动生成）
@@ -285,6 +266,10 @@ parse_arguments() {
                 ;;
             --silent-uninstall|--auto-uninstall)
                 AUTO_UNINSTALL=true
+                shift
+                ;;
+            --silent-update|--auto-update)
+                AUTO_UPDATE=true
                 shift
                 ;;
             --port)
@@ -358,6 +343,10 @@ parse_arguments() {
         echo -e "${RED}不能同时卸载全部和卸载指定端口。${RESET}"
         exit 1
     fi
+    if [ "$AUTO_UPDATE" = true ] && { [ "$AUTO_INSTALL" = true ] || [ "$AUTO_UNINSTALL" = true ] || [ -n "$AUTO_UNINSTALL_PORT" ]; }; then
+        echo -e "${RED}静默更新不能与安装/卸载操作同时执行。${RESET}"
+        exit 1
+    fi
 
     if [ ${#positional[@]} -gt 0 ]; then
         set -- "${positional[@]}"
@@ -395,6 +384,47 @@ detect_installed_snell_version() {
         fi
     else
         echo "unknown"
+    fi
+}
+
+print_install_summary() {
+    local port="$1"
+    local psk="$2"
+    local ipv6="$3"
+    local dns="$4"
+    local version_choice="${5:-$SNELL_VERSION_CHOICE}"
+
+    echo -e "\n${GREEN}安装完成！以下是您的配置信息：${RESET}"
+    echo -e "${CYAN}--------------------------------${RESET}"
+    echo -e "${YELLOW}监听端口: ${port}${RESET}"
+    echo -e "${YELLOW}PSK 密钥: ${psk}${RESET}"
+    echo -e "${YELLOW}IPv6: ${ipv6}${RESET}"
+    echo -e "${YELLOW}DNS 服务器: ${dns}${RESET}"
+    echo -e "${CYAN}--------------------------------${RESET}"
+
+    echo -e "\n${GREEN}服务器地址信息：${RESET}"
+    local ipv4_addr ipv6_addr ip_country_ipv4 ip_country_ipv6
+
+    ipv4_addr=$(curl -s4 https://api.ipify.org)
+    if [ $? -eq 0 ] && [ -n "$ipv4_addr" ]; then
+        ip_country_ipv4=$(curl -s http://ipinfo.io/${ipv4_addr}/country)
+        echo -e "${GREEN}IPv4 地址: ${RESET}${ipv4_addr} ${GREEN}所在国家: ${RESET}${ip_country_ipv4}"
+    fi
+
+    ipv6_addr=$(curl -s6 https://api64.ipify.org)
+    if [ $? -eq 0 ] && [ -n "$ipv6_addr" ]; then
+        ip_country_ipv6=$(curl -s https://ipapi.co/${ipv6_addr}/country/)
+        echo -e "${GREEN}IPv6 地址: ${RESET}${ipv6_addr} ${GREEN}所在国家: ${RESET}${ip_country_ipv6}"
+    fi
+
+    echo -e "\n${GREEN}Surge 配置格式：${RESET}"
+    local installed_version
+    installed_version=$(detect_installed_snell_version)
+    if [ -n "$ipv4_addr" ]; then
+        generate_surge_config "$ipv4_addr" "$port" "$psk" "$version_choice" "$ip_country_ipv4" "$installed_version"
+    fi
+    if [ -n "$ipv6_addr" ]; then
+        generate_surge_config "$ipv6_addr" "$port" "$psk" "$version_choice" "$ip_country_ipv6" "$installed_version"
     fi
 }
 
@@ -463,7 +493,7 @@ check_and_migrate_config() {
         echo -e "旧配置位置："
         [ -f "$OLD_SNELL_CONF_FILE" ] && echo -e "- 配置文件：${OLD_SNELL_CONF_FILE}"
         [ -f "$OLD_SYSTEMD_SERVICE_FILE" ] && echo -e "- 服务文件：${OLD_SYSTEMD_SERVICE_FILE}"
-        
+
         # 检查用户目录是否存在
         if [ ! -d "${SNELL_CONF_DIR}/users" ]; then
             need_migration=true
@@ -484,10 +514,10 @@ check_and_migrate_config() {
         read -r choice
         if [ "$choice" = "y" ] || [ "$choice" = "Y" ]; then
             echo -e "${CYAN}开始迁移配置文件...${RESET}"
-            
+
             # 停止服务
             systemctl stop snell 2>/dev/null
-            
+
             # 迁移配置文件
             if [ -f "$OLD_SNELL_CONF_FILE" ]; then
                 cp "$OLD_SNELL_CONF_FILE" "${SNELL_CONF_FILE}"
@@ -496,7 +526,7 @@ check_and_migrate_config() {
                 chmod 644 "${SNELL_CONF_FILE}"
                 echo -e "${GREEN}已迁移配置文件${RESET}"
             fi
-            
+
             # 迁移服务文件
             if [ -f "$OLD_SYSTEMD_SERVICE_FILE" ]; then
                 # 更新服务文件中的配置文件路径
@@ -504,7 +534,7 @@ check_and_migrate_config() {
                 chmod 644 "$SYSTEMD_SERVICE_FILE"
                 echo -e "${GREEN}已迁移服务文件${RESET}"
             fi
-            
+
             # 询问是否删除旧文件
             echo -e "${YELLOW}是否删除旧的配置文件？[y/N]${RESET}"
             read -r del_choice
@@ -513,11 +543,11 @@ check_and_migrate_config() {
                 [ -f "$OLD_SYSTEMD_SERVICE_FILE" ] && rm -f "$OLD_SYSTEMD_SERVICE_FILE"
                 echo -e "${GREEN}已删除旧的配置文件${RESET}"
             fi
-            
+
             # 重新加载服务
             systemctl daemon-reload
             systemctl start snell
-            
+
             # 验证服务状态
             if systemctl is-active --quiet snell; then
                 echo -e "${GREEN}配置迁移完成，服务已成功启动${RESET}"
@@ -534,30 +564,30 @@ check_and_migrate_config() {
 # 自动更新脚本
 auto_update_script() {
     echo -e "${CYAN}正在检查脚本更新...${RESET}"
-    
+
     # 创建临时文件
     TMP_SCRIPT=$(mktemp)
-    
+
     # 下载最新版本
     if curl -sL https://raw.githubusercontent.com/jinqians/snell.sh/main/snell.sh -o "$TMP_SCRIPT"; then
         # 获取新版本号
         new_version=$(grep "current_version=" "$TMP_SCRIPT" | cut -d'"' -f2)
-        
+
         # 比较版本号
         if [ "$new_version" != "$current_version" ]; then
             echo -e "${GREEN}发现新版本：${new_version}${RESET}"
             echo -e "${YELLOW}当前版本：${current_version}${RESET}"
-            
+
             # 备份当前脚本
             cp "$0" "${0}.backup"
-            
+
             # 更新脚本
             mv "$TMP_SCRIPT" "$0"
             chmod +x "$0"
-            
+
             echo -e "${GREEN}脚本已更新到最新版本${RESET}"
             echo -e "${YELLOW}已备份原脚本到：${0}.backup${RESET}"
-            
+
             # 提示用户重新运行脚本
             echo -e "${CYAN}请重新运行脚本以使用新版本${RESET}"
             exit 0
@@ -614,20 +644,20 @@ check_snell_installed() {
 version_greater_equal() {
     local ver1=$1
     local ver2=$2
-    
+
     # 移除 'v' 或 'V' 前缀，并转换为小写
     ver1=$(echo "${ver1#[vV]}" | tr '[:upper:]' '[:lower:]')
     ver2=$(echo "${ver2#[vV]}" | tr '[:upper:]' '[:lower:]')
-    
+
     # 处理 beta 版本号（如 5.0.0b1, 5.0.0b2）
     # 将 beta 版本转换为可比较的格式
     ver1=$(echo "$ver1" | sed 's/b\([0-9]*\)/\.999\1/g')
     ver2=$(echo "$ver2" | sed 's/b\([0-9]*\)/\.999\1/g')
-    
+
     # 将版本号分割为数组
     IFS='.' read -ra VER1 <<< "$ver1"
     IFS='.' read -ra VER2 <<< "$ver2"
-    
+
     # 确保数组长度相等
     while [ ${#VER1[@]} -lt 4 ]; do
         VER1+=("0")
@@ -635,12 +665,12 @@ version_greater_equal() {
     while [ ${#VER2[@]} -lt 4 ]; do
         VER2+=("0")
     done
-    
+
     # 比较版本号
     for i in {0..3}; do
         local val1=${VER1[i]:-0}
         local val2=${VER2[i]:-0}
-        
+
         # 如果是数字，直接比较
         if is_numeric "$val1" && is_numeric "$val2"; then
             if [ "$val1" -gt "$val2" ]; then
@@ -688,7 +718,7 @@ get_system_dns() {
             return 0
         fi
     fi
-    
+
     # 如果无法从resolv.conf获取，尝试使用公共DNS
     echo "1.1.1.1,8.8.8.8"
 }
@@ -727,12 +757,12 @@ open_port() {
     if command -v iptables &> /dev/null; then
         echo -e "${CYAN}在 iptables 中开放端口 $PORT${RESET}"
         iptables -I INPUT -p tcp --dport "$PORT" -j ACCEPT
-        
+
         # 创建 iptables 规则保存目录（如果不存在）
         local rules_dir
         rules_dir=$(dirname "$IPTABLES_RULES_PATH")
         mkdir -p "$rules_dir"
-        
+
         # 尝试保存规则，如果失败则不中断脚本
         iptables-save > "$IPTABLES_RULES_PATH" || true
     fi
@@ -780,7 +810,7 @@ ensure_snell_binary_installed() {
 
     echo -e "${CYAN}未检测到 Snell 二进制，正在执行基础安装...${RESET}"
 
-    SNELL_VERSION_CHOICE="v4"
+    SNELL_VERSION_CHOICE="v5"
     if [ -x "$(command -v apt)" ]; then
         wait_for_apt
         apt update >/dev/null 2>&1
@@ -1034,6 +1064,7 @@ install_snell() {
         fi
 
         silent_apply_port_config "$PORT" "$PSK" "$IPV6_ENABLED" "$DNS"
+        print_install_summary "$PORT" "$PSK" "$IPV6_ENABLED" "$DNS" "$SNELL_VERSION_CHOICE"
         ensure_control_script_installed
         return 0
     fi
@@ -1082,7 +1113,7 @@ install_snell() {
 
     echo -e "${CYAN}正在下载 Snell ${SNELL_VERSION_CHOICE} (${SNELL_VERSION})...${RESET}"
     echo -e "${YELLOW}下载链接: ${SNELL_URL}${RESET}"
-    
+
     # v4 和 v5 版本都使用 zip 格式，统一处理
     wget ${SNELL_URL} -O snell-server.zip
     if [ $? -ne 0 ]; then
@@ -1158,44 +1189,7 @@ EOF
     # 开放端口
     open_port "$PORT"
 
-    # 在安装完成后输出配置信息
-    echo -e "\n${GREEN}安装完成！以下是您的配置信息：${RESET}"
-    echo -e "${CYAN}--------------------------------${RESET}"
-    echo -e "${YELLOW}监听端口: ${PORT}${RESET}"
-    echo -e "${YELLOW}PSK 密钥: ${PSK}${RESET}"
-    echo -e "${YELLOW}IPv6: ${IPV6_ENABLED}${RESET}"
-    echo -e "${YELLOW}DNS 服务器: ${DNS}${RESET}"
-    echo -e "${CYAN}--------------------------------${RESET}"
-
-    # 获取并显示服务器IP地址
-    echo -e "\n${GREEN}服务器地址信息：${RESET}"
-    
-    # 获取 IPv4 地址
-    IPV4_ADDR=$(curl -s4 https://api.ipify.org)
-    if [ $? -eq 0 ] && [ ! -z "$IPV4_ADDR" ]; then
-        IP_COUNTRY_IPV4=$(curl -s http://ipinfo.io/${IPV4_ADDR}/country)
-        echo -e "${GREEN}IPv4 地址: ${RESET}${IPV4_ADDR} ${GREEN}所在国家: ${RESET}${IP_COUNTRY_IPV4}"
-    fi
-    
-    # 获取 IPv6 地址
-    IPV6_ADDR=$(curl -s6 https://api64.ipify.org)
-    if [ $? -eq 0 ] && [ ! -z "$IPV6_ADDR" ]; then
-        IP_COUNTRY_IPV6=$(curl -s https://ipapi.co/${IPV6_ADDR}/country/)
-        echo -e "${GREEN}IPv6 地址: ${RESET}${IPV6_ADDR} ${GREEN}所在国家: ${RESET}${IP_COUNTRY_IPV6}"
-    fi
-
-    # 输出 Surge 配置格式
-    echo -e "\n${GREEN}Surge 配置格式：${RESET}"
-    local installed_version=$(detect_installed_snell_version)
-    if [ ! -z "$IPV4_ADDR" ]; then
-        generate_surge_config "$IPV4_ADDR" "$PORT" "$PSK" "$SNELL_VERSION_CHOICE" "$IP_COUNTRY_IPV4" "$installed_version"
-    fi
-    
-    if [ ! -z "$IPV6_ADDR" ]; then
-        generate_surge_config "$IPV6_ADDR" "$PORT" "$PSK" "$SNELL_VERSION_CHOICE" "$IP_COUNTRY_IPV6" "$installed_version"
-    fi
-
-
+    print_install_summary "$PORT" "$PSK" "$IPV6_ENABLED" "$DNS" "$SNELL_VERSION_CHOICE"
     install_control_script
 }
 
@@ -1207,21 +1201,21 @@ update_snell_binary() {
     echo -e "${GREEN}✓ 端口、密码、用户配置都不会改变${RESET}"
     echo -e "${GREEN}✓ 服务会自动重启${RESET}"
     echo -e "${CYAN}============================================${RESET}"
-    
+
     echo -e "${CYAN}正在备份当前配置...${RESET}"
     local backup_dir
     backup_dir=$(backup_snell_config)
     echo -e "${GREEN}配置已备份到: $backup_dir${RESET}"
 
     echo -e "${CYAN}正在更新 Snell 二进制文件...${RESET}"
-    
+
     # 获取最新版本信息（版本已在 check_snell_update 中确定）
     get_latest_snell_version
     ARCH=$(uname -m)
     SNELL_URL=$(get_snell_download_url "$SNELL_VERSION_CHOICE")
 
     echo -e "${CYAN}正在下载 Snell ${SNELL_VERSION_CHOICE} (${SNELL_VERSION})...${RESET}"
-    
+
     # v4 和 v5 版本都使用 zip 格式，统一处理
     wget ${SNELL_URL} -O snell-server.zip
     if [ $? -ne 0 ]; then
@@ -1264,7 +1258,7 @@ update_snell_binary() {
             fi
         done
     fi
-    
+
     echo -e "${CYAN}============================================${RESET}"
     echo -e "${GREEN}✅ Snell 更新完成！${RESET}"
     echo -e "${GREEN}✓ 版本已更新到: ${SNELL_VERSION_CHOICE} (${SNELL_VERSION})${RESET}"
@@ -1311,17 +1305,17 @@ uninstall_snell() {
     rm -f /usr/local/bin/snell-server
     rm -rf ${SNELL_CONF_DIR}
     rm -f /usr/local/bin/snell  # 删除管理脚本
-    
+
     # 重载 systemd 配置
     systemctl daemon-reload
-    
+
     echo -e "${GREEN}Snell 及其所有多用户配置已成功卸载${RESET}"
 }
 
 # 重启 Snell
 restart_snell() {
     echo -e "${YELLOW}正在重启所有 Snell 服务...${RESET}"
-    
+
     # 重启主服务
     systemctl restart snell
     if [ $? -eq 0 ]; then
@@ -1354,7 +1348,7 @@ restart_snell() {
 # 检查服务状态并显示
 check_and_show_status() {
     echo -e "\n${CYAN}=============== 服务状态检查 ===============${RESET}"
-    
+
     # 检查 Snell 状态
     if command -v snell-server &> /dev/null; then
         # 初始化计数器和资源使用变量
@@ -1362,7 +1356,7 @@ check_and_show_status() {
         local running_count=0
         local total_snell_memory=0
         local total_snell_cpu=0
-        
+
         local main_service_exists=false
         if systemctl list-unit-files | grep -q '^snell.service'; then
             main_service_exists=true
@@ -1373,7 +1367,7 @@ check_and_show_status() {
             if systemctl is-active snell &> /dev/null; then
                 user_count=$((user_count + 1))
                 running_count=$((running_count + 1))
-                
+
                 # 获取主服务资源使用情况
                 local main_pid=$(systemctl show -p MainPID snell | cut -d'=' -f2)
                 if [ ! -z "$main_pid" ] && [ "$main_pid" != "0" ]; then
@@ -1390,7 +1384,7 @@ check_and_show_status() {
                 user_count=$((user_count + 1))
             fi
         fi
-        
+
         # 检查多用户状态
         if [ -d "${SNELL_CONF_DIR}/users" ]; then
         for user_conf in "${SNELL_CONF_DIR}/users"/*; do
@@ -1403,7 +1397,7 @@ check_and_show_status() {
                         user_count=$((user_count + 1))
                         if systemctl is-active --quiet "snell-${port}"; then
                             running_count=$((running_count + 1))
-                            
+
                             # 获取用户服务资源使用情况
                             local user_pid=$(systemctl show -p MainPID "snell-${port}" | cut -d'=' -f2)
                             if [ ! -z "$user_pid" ] && [ "$user_pid" != "0" ]; then
@@ -1421,14 +1415,14 @@ check_and_show_status() {
                 fi
             done
         fi
-        
+
         # 显示 Snell 状态
         local total_snell_memory_mb=$(echo "scale=2; $total_snell_memory/1024" | bc)
         printf "${GREEN}Snell 已安装${RESET}  ${YELLOW}CPU：%.2f%%${RESET}  ${YELLOW}内存：%.2f MB${RESET}  ${GREEN}运行中：${running_count}/${user_count}${RESET}\n" "$total_snell_cpu" "$total_snell_memory_mb"
     else
         echo -e "${YELLOW}Snell 未安装${RESET}"
     fi
-    
+
     # 检查 ShadowTLS 状态
     if [ -f "/usr/local/bin/shadow-tls" ]; then
         # 初始化 ShadowTLS 服务计数器和资源使用
@@ -1437,20 +1431,20 @@ check_and_show_status() {
         local total_stls_memory=0
         local total_stls_cpu=0
         declare -A processed_ports
-        
+
         # 检查 Snell 的 ShadowTLS 服务
         local snell_services=$(find /etc/systemd/system -name "shadowtls-snell-*.service" 2>/dev/null | sort -u)
         if [ ! -z "$snell_services" ]; then
             while IFS= read -r service_file; do
                 local port=$(basename "$service_file" | sed 's/shadowtls-snell-\([0-9]*\)\.service/\1/')
-                
+
                 # 检查是否已处理过该端口
                 if [ -z "${processed_ports[$port]}" ]; then
                     processed_ports[$port]=1
                     stls_total=$((stls_total + 1))
                     if systemctl is-active "shadowtls-snell-${port}" &> /dev/null; then
                         stls_running=$((stls_running + 1))
-                        
+
                         # 获取 ShadowTLS 服务资源使用情况
                         local stls_pid=$(systemctl show -p MainPID "shadowtls-snell-${port}" | cut -d'=' -f2)
                         if [ ! -z "$stls_pid" ] && [ "$stls_pid" != "0" ]; then
@@ -1467,7 +1461,7 @@ check_and_show_status() {
                 fi
             done <<< "$snell_services"
         fi
-        
+
         # 显示 ShadowTLS 状态
         if [ $stls_total -gt 0 ]; then
             local total_stls_memory_mb=$(echo "scale=2; $total_stls_memory/1024" | bc)
@@ -1478,7 +1472,7 @@ check_and_show_status() {
     else
         echo -e "${YELLOW}ShadowTLS 未安装${RESET}"
     fi
-    
+
     echo -e "${CYAN}============================================${RESET}\n"
 }
 
@@ -1486,35 +1480,35 @@ check_and_show_status() {
 view_snell_config() {
     echo -e "${GREEN}Snell 配置信息:${RESET}"
     echo -e "${CYAN}================================${RESET}"
-    
+
     # 检测当前安装的 Snell 版本
     local installed_version=$(detect_installed_snell_version)
     if [ "$installed_version" != "unknown" ]; then
         echo -e "${YELLOW}当前安装版本: Snell ${installed_version}${RESET}"
     fi
-    
+
     # 获取 IPv4 地址
     IPV4_ADDR=$(curl -s4 https://api.ipify.org)
     if [ $? -eq 0 ] && [ ! -z "$IPV4_ADDR" ]; then
         IP_COUNTRY_IPV4=$(curl -s http://ipinfo.io/${IPV4_ADDR}/country)
         echo -e "${GREEN}IPv4 地址: ${RESET}${IPV4_ADDR} ${GREEN}所在国家: ${RESET}${IP_COUNTRY_IPV4}"
     fi
-    
+
     # 获取 IPv6 地址
     IPV6_ADDR=$(curl -s6 https://api64.ipify.org)
     if [ $? -eq 0 ] && [ ! -z "$IPV6_ADDR" ]; then
         IP_COUNTRY_IPV6=$(curl -s https://ipapi.co/${IPV6_ADDR}/country/)
         echo -e "${GREEN}IPv6 地址: ${RESET}${IPV6_ADDR} ${GREEN}所在国家: ${RESET}${IP_COUNTRY_IPV6}"
     fi
-    
+
     # 检查是否获取到 IP 地址
     if [ -z "$IPV4_ADDR" ] && [ -z "$IPV6_ADDR" ]; then
         echo -e "${RED}无法获取到公网 IP 地址，请检查网络连接。${RESET}"
         return
     fi
-    
+
     echo -e "\n${YELLOW}=== 用户配置列表 ===${RESET}"
-    
+
     # 显示主用户配置
     local main_conf="${SNELL_CONF_DIR}/users/snell-main.conf"
     if [ -f "$main_conf" ]; then
@@ -1523,12 +1517,12 @@ view_snell_config() {
         local main_psk=$(grep -E '^psk' "$main_conf" | awk -F'=' '{print $2}' | tr -d ' ')
         local main_ipv6=$(grep -E '^ipv6' "$main_conf" | awk -F'=' '{print $2}' | tr -d ' ')
         local main_dns=$(grep -E '^dns' "$main_conf" | awk -F'=' '{print $2}' | tr -d ' ')
-        
+
         echo -e "${YELLOW}端口: ${main_port}${RESET}"
         echo -e "${YELLOW}PSK: ${main_psk}${RESET}"
         echo -e "${YELLOW}IPv6: ${main_ipv6}${RESET}"
         echo -e "${YELLOW}DNS: ${main_dns}${RESET}"
-        
+
         echo -e "\n${GREEN}Surge 配置格式：${RESET}"
         if [ ! -z "$IPV4_ADDR" ]; then
             generate_surge_config "$IPV4_ADDR" "$main_port" "$main_psk" "$installed_version" "$IP_COUNTRY_IPV4" "$installed_version"
@@ -1537,7 +1531,7 @@ view_snell_config() {
             generate_surge_config "$IPV6_ADDR" "$main_port" "$main_psk" "$installed_version" "$IP_COUNTRY_IPV6" "$installed_version"
         fi
     fi
-    
+
     # 显示其他用户配置
     if [ -d "${SNELL_CONF_DIR}/users" ]; then
         for user_conf in "${SNELL_CONF_DIR}/users"/*; do
@@ -1549,12 +1543,12 @@ view_snell_config() {
                 local user_psk=$(grep -E '^psk' "$user_conf" | awk -F'=' '{print $2}' | tr -d ' ')
                 local user_ipv6=$(grep -E '^ipv6' "$user_conf" | awk -F'=' '{print $2}' | tr -d ' ')
                 local user_dns=$(grep -E '^dns' "$user_conf" | awk -F'=' '{print $2}' | tr -d ' ')
-                
+
                 echo -e "\n${GREEN}用户配置 (端口: ${user_port}):${RESET}"
                 echo -e "${YELLOW}PSK: ${user_psk}${RESET}"
                 echo -e "${YELLOW}IPv6: ${user_ipv6}${RESET}"
                 echo -e "${YELLOW}DNS: ${user_dns}${RESET}"
-                
+
                 echo -e "\n${GREEN}Surge 配置格式：${RESET}"
                 if [ ! -z "$IPV4_ADDR" ]; then
                     generate_surge_config "$IPV4_ADDR" "$user_port" "$user_psk" "$installed_version" "$IP_COUNTRY_IPV4" "$installed_version"
@@ -1565,7 +1559,7 @@ view_snell_config() {
             fi
         done
     fi
-    
+
     # 如果 ShadowTLS 已安装，显示组合配置
     local snell_version=$(detect_installed_snell_version)
     local snell_services=$(find /etc/systemd/system -name "shadowtls-snell-*.service" 2>/dev/null | sort -u)
@@ -1620,7 +1614,7 @@ view_snell_config() {
             fi
         done <<< "$snell_services"
     fi
-    
+
     echo -e "\n${YELLOW}注意：${RESET}"
     echo -e "1. Snell 仅支持 Surge 客户端"
     echo -e "2. 请将配置中的服务器地址替换为实际可用的地址"
@@ -1631,7 +1625,7 @@ view_snell_config() {
 get_current_snell_version() {
     # 检测当前安装的 Snell 版本
     local current_installed_version=$(detect_installed_snell_version)
-    
+
     if [ "$current_installed_version" = "v5" ]; then
         # v5 版本获取完整版本号
         CURRENT_VERSION=$(snell-server --v 2>&1 | grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+[a-z0-9]*')
@@ -1652,53 +1646,24 @@ get_current_snell_version() {
 # 检查 Snell 更新
 check_snell_update() {
     echo -e "\n${CYAN}=============== 检查 Snell 更新 ===============${RESET}"
-    
+
     # 检测当前安装的 Snell 版本
     local current_installed_version=$(detect_installed_snell_version)
     if [ "$current_installed_version" = "unknown" ]; then
         echo -e "${RED}无法检测当前 Snell 版本${RESET}"
         return 1
     fi
-    
+
     echo -e "${YELLOW}当前安装版本: Snell ${current_installed_version}${RESET}"
-    
-    # 根据当前版本确定更新策略
+
+    # 所有更新统一使用 Snell v5（兼容 v4 客户端）
+    SNELL_VERSION_CHOICE="v5"
     if [ "$current_installed_version" = "v4" ]; then
-        # v4 用户：询问是否升级到 v5
-        echo -e "\n${CYAN}检测到您当前使用的是 Snell v4，是否要升级到 v5？${RESET}"
-        echo -e "${YELLOW}注意：v5 为测试版本，可能存在兼容性问题${RESET}"
-        echo -e "${GREEN}1.${RESET} 升级到 Snell v5"
-        echo -e "${GREEN}2.${RESET} 继续使用 Snell v4（检查 v4 更新）"
-        echo -e "${GREEN}3.${RESET} 取消更新"
-        
-        while true; do
-            read -rp "请选择 [1-3]: " upgrade_choice
-            case "$upgrade_choice" in
-                1)
-                    SNELL_VERSION_CHOICE="v5"
-                    echo -e "${GREEN}已选择升级到 Snell v5${RESET}"
-                    break
-                    ;;
-                2)
-                    SNELL_VERSION_CHOICE="v4"
-                    echo -e "${GREEN}已选择继续使用 Snell v4${RESET}"
-                    break
-                    ;;
-                3)
-                    echo -e "${CYAN}已取消更新${RESET}"
-                    return 0
-                    ;;
-                *)
-                    echo -e "${RED}请输入正确的选项 [1-3]${RESET}"
-                    ;;
-            esac
-        done
+        echo -e "\n${CYAN}Snell v5 与 v4 客户端配置兼容，将升级到 Snell v5。${RESET}"
     else
-        # v5 用户：直接检查 v5 更新，无需用户选择
-        SNELL_VERSION_CHOICE="v5"
-        echo -e "${GREEN}当前为 Snell v5，将检查 v5 更新${RESET}"
+        echo -e "${GREEN}当前为 Snell v5，将检查 v5 最新版本。${RESET}"
     fi
-    
+
     # 获取最新版本信息
     get_latest_snell_version
     get_current_snell_version
@@ -1725,11 +1690,45 @@ check_snell_update() {
     fi
 }
 
+# 强制更新 Snell 二进制并重启所有服务
+force_refresh_snell_server() {
+    if ! check_snell_installed; then
+        echo -e "${YELLOW}当前系统未安装 Snell，无法执行更新操作。${RESET}"
+        return 1
+    fi
+
+    echo -e "\n${CYAN}=============== Snell 强制更新 ===============${RESET}"
+    echo -e "${GREEN}Snell v5 与 v4 配置兼容，将重新下载最新的 Snell v5 并重启所有服务。${RESET}"
+    SNELL_VERSION_CHOICE="v5"
+    update_snell_binary
+}
+
+silent_update_snell() {
+    echo -e "\n${CYAN}=============== 静默更新 Snell ===============${RESET}"
+    if ! check_snell_installed; then
+        echo -e "${RED}未检测到 Snell 安装，无法执行静默更新。${RESET}"
+        exit 1
+    fi
+
+    SNELL_VERSION_CHOICE="v5"
+    get_latest_snell_version
+    get_current_snell_version
+
+    echo -e "${YELLOW}当前版本: ${CURRENT_VERSION}${RESET}"
+    echo -e "${YELLOW}最新版本: ${SNELL_VERSION}${RESET}"
+
+    if version_greater_equal "$CURRENT_VERSION" "$SNELL_VERSION"; then
+        echo -e "${GREEN}当前已是最新版本，无需更新。${RESET}"
+    else
+        update_snell_binary
+    fi
+}
+
 # 获取最新 GitHub 版本
 get_latest_github_version() {
     local api_url="https://api.github.com/repos/jinqians/snell.sh/releases/latest"
     local response
-    
+
     response=$(curl -s "$api_url")
     if [ $? -ne 0 ] || [ -z "$response" ]; then
         echo -e "${RED}无法获取 GitHub 上的最新版本信息。${RESET}"
@@ -1746,24 +1745,24 @@ get_latest_github_version() {
 # 更新脚本
 update_script() {
     echo -e "${CYAN}正在检查脚本更新...${RESET}"
-    
+
     # 创建临时文件
     TMP_SCRIPT=$(mktemp)
-    
+
     # 下载最新版本
     if curl -sL https://raw.githubusercontent.com/jinqians/snell.sh/main/snell.sh -o "$TMP_SCRIPT"; then
         # 获取新版本号
         new_version=$(grep "current_version=" "$TMP_SCRIPT" | cut -d'"' -f2)
-        
+
         if [ -z "$new_version" ]; then
             echo -e "${RED}无法获取新版本信息${RESET}"
             rm -f "$TMP_SCRIPT"
             return 1
         fi
-        
+
         echo -e "${YELLOW}当前版本：${current_version}${RESET}"
         echo -e "${YELLOW}最新版本：${new_version}${RESET}"
-        
+
         # 比较版本号
         if [ "$new_version" != "$current_version" ]; then
             echo -e "${CYAN}是否更新到新版本？[y/N]${RESET}"
@@ -1771,14 +1770,14 @@ update_script() {
             if [ "$choice" = "y" ] || [ "$choice" = "Y" ]; then
                 # 获取当前脚本的完整路径
                 SCRIPT_PATH=$(readlink -f "$0")
-                
+
                 # 备份当前脚本
                 cp "$SCRIPT_PATH" "${SCRIPT_PATH}.backup"
-                
+
                 # 更新脚本
                 mv "$TMP_SCRIPT" "$SCRIPT_PATH"
                 chmod +x "$SCRIPT_PATH"
-                
+
                 echo -e "${GREEN}脚本已更新到最新版本${RESET}"
                 echo -e "${YELLOW}已备份原脚本到：${SCRIPT_PATH}.backup${RESET}"
                 echo -e "${CYAN}请重新运行脚本以使用新版本${RESET}"
@@ -1814,34 +1813,34 @@ get_shadowtls_config() {
     if [ -z "$main_port" ]; then
         return 1
     fi
-    
+
     # 检查对应端口的 ShadowTLS 服务
     local service_name="shadowtls-snell-${main_port}"
     if ! systemctl is-active --quiet "$service_name"; then
         return 1
     fi
-    
+
     local service_file="/etc/systemd/system/${service_name}.service"
     if [ ! -f "$service_file" ]; then
         return 1
     fi
-    
+
     # 从服务文件中读取配置行
     local exec_line=$(grep "ExecStart=" "$service_file")
     if [ -z "$exec_line" ]; then
         return 1
     fi
-    
+
     # 提取配置信息
     local tls_domain=$(echo "$exec_line" | grep -o -- "--tls [^ ]*" | cut -d' ' -f2)
     local password=$(echo "$exec_line" | grep -o -- "--password [^ ]*" | cut -d' ' -f2)
     local listen_part=$(echo "$exec_line" | grep -o -- "--listen [^ ]*" | cut -d' ' -f2)
     local listen_port=$(echo "$listen_part" | grep -o '[0-9]*$')
-    
+
     if [ -z "$tls_domain" ] || [ -z "$password" ] || [ -z "$listen_port" ]; then
         return 1
     fi
-    
+
     echo "${password}|${tls_domain}|${listen_port}"
     return 0
 }
@@ -1868,6 +1867,13 @@ if [ "$AUTO_UNINSTALL" = true ]; then
     exit 0
 fi
 
+if [ "$AUTO_UPDATE" = true ]; then
+    check_curl
+    check_bc
+    silent_update_snell
+    exit 0
+fi
+
 # 运行初始检查
 initial_check
 
@@ -1880,7 +1886,7 @@ fi
 setup_multi_user() {
     echo -e "${CYAN}正在执行多用户管理脚本...${RESET}"
     bash <(curl -sL https://raw.githubusercontent.com/jinqians/snell.sh/main/multi-user.sh)
-    
+
     # 多用户管理脚本执行完毕后会自动返回这里
     echo -e "${GREEN}多用户管理操作完成${RESET}"
     sleep 1  # 给用户一点时间看到提示
@@ -1895,39 +1901,40 @@ show_menu() {
     echo -e "${GREEN}作者: jinqian${RESET}"
     echo -e "${GREEN}网站：https://jinqians.com${RESET}"
     echo -e "${CYAN}============================================${RESET}"
-    
+
     # 显示服务状态
     check_and_show_status
-    
+
     echo -e "${YELLOW}=== 基础功能 ===${RESET}"
     echo -e "${GREEN}1.${RESET} 安装 Snell"
     echo -e "${GREEN}2.${RESET} 卸载 Snell"
     echo -e "${GREEN}3.${RESET} 查看配置"
     echo -e "${GREEN}4.${RESET} 重启服务"
-    
+
     echo -e "\n${YELLOW}=== 增强功能 ===${RESET}"
     echo -e "${GREEN}5.${RESET} ShadowTLS 管理"
     echo -e "${GREEN}6.${RESET} BBR 管理"
     echo -e "${GREEN}7.${RESET} 多用户管理"
-    
+
     echo -e "\n${YELLOW}=== 系统功能 ===${RESET}"
     echo -e "${GREEN}8.${RESET} 更新Snell"
     echo -e "${GREEN}9.${RESET} 更新脚本"
     echo -e "${GREEN}10.${RESET} 查看服务状态"
     echo -e "${GREEN}11.${RESET} 卸载指定端口"
+    echo -e "${GREEN}12.${RESET} 强制更新 Snell Server 并重启服务"
     echo -e "${GREEN}0.${RESET} 退出脚本"
-    
+
     echo -e "${CYAN}============================================${RESET}"
-    read -rp "请输入选项 [0-11]: " num
+    read -rp "请输入选项 [0-12]: " num
 }
 
 #开启bbr
 setup_bbr() {
     echo -e "${CYAN}正在获取并执行 BBR 管理脚本...${RESET}"
-    
+
     # 直接从远程执行BBR脚本
     bash <(curl -sL https://raw.githubusercontent.com/jinqians/snell.sh/main/bbr.sh)
-    
+
     # BBR 脚本执行完毕后会自动返回这里
     echo -e "${GREEN}BBR 管理操作完成${RESET}"
     sleep 1  # 给用户一点时间看到提示
@@ -1937,7 +1944,7 @@ setup_bbr() {
 setup_shadowtls() {
     echo -e "${CYAN}正在执行 ShadowTLS 管理脚本...${RESET}"
     bash <(curl -sL https://raw.githubusercontent.com/jinqians/snell.sh/main/shadowtls.sh)
-    
+
     # ShadowTLS 脚本执行完毕后会自动返回这里
     echo -e "${GREEN}ShadowTLS 管理操作完成${RESET}"
     sleep 1  # 给用户一点时间看到提示
@@ -1965,7 +1972,7 @@ get_all_snell_users() {
     if [ ! -d "${SNELL_CONF_DIR}/users" ]; then
         return 1
     fi
-    
+
     # 首先获取主用户配置
     local main_port=""
     local main_psk=""
@@ -1976,7 +1983,7 @@ get_all_snell_users() {
             echo "${main_port}|${main_psk}"
         fi
     fi
-    
+
     # 获取其他用户配置
         for user_conf in "${SNELL_CONF_DIR}/users"/snell-*.conf; do
             if [ -f "$user_conf" ]; then
@@ -2030,14 +2037,18 @@ while true; do
         11)
             uninstall_port_prompt
             ;;
+        12)
+            force_refresh_snell_server
+            ;;
         0)
             echo -e "${GREEN}感谢使用，再见！${RESET}"
             exit 0
             ;;
         *)
-            echo -e "${RED}请输入正确的选项 [0-11]${RESET}"
+            echo -e "${RED}请输入正确的选项 [0-12]${RESET}"
             ;;
     esac
     echo -e "\n${CYAN}按任意键返回主菜单...${RESET}"
     read -n 1 -s -r
 done
+
