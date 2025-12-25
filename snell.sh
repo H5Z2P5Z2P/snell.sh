@@ -129,6 +129,7 @@ AUTO_PSK=""
 AUTO_IPV6="false"
 AUTO_DNS_DEFAULT="1.1.1.1,1.0.0.1,8.8.8.8,8.8.4.4"
 AUTO_DNS="$AUTO_DNS_DEFAULT"
+AUTO_EXPOSE="true"
 
 #当前版本号
 current_version="4.6"
@@ -251,6 +252,9 @@ print_usage() {
   --port <端口>           设置 Snell 监听端口（必填，静默模式）
   --psk <密钥>            设置 Snell PSK（省略则自动生成）
   --ipv6 <true|false>     设置 IPv6 开关，静默模式默认 false
+  --psk <密钥>            设置 Snell PSK（省略则自动生成）
+  --ipv6 <true|false>     设置 IPv6 开关，静默模式默认 false
+  --expose <true|false>   设置是否开放端口，默认 true
   --dns <dns列表>         自定义 DNS，默认 1.1.1.1,1.0.0.1,8.8.8.8,8.8.4.4
   -h, --help              显示此帮助信息
 EOF
@@ -292,6 +296,10 @@ parse_arguments() {
                 AUTO_DNS="$2"
                 shift 2
                 ;;
+            --expose)
+                AUTO_EXPOSE="$(echo "$2" | tr '[:upper:]' '[:lower:]')"
+                shift 2
+                ;;
             -h|--help)
                 print_usage
                 exit 0
@@ -320,6 +328,13 @@ parse_arguments() {
             true|false) ;;
             *)
                 echo -e "${RED}--ipv6 仅支持 true 或 false。${RESET}"
+                exit 1
+                ;;
+        esac
+        case "$AUTO_EXPOSE" in
+            true|false) ;;
+            *)
+                echo -e "${RED}--expose 仅支持 true 或 false。${RESET}"
                 exit 1
                 ;;
         esac
@@ -744,9 +759,46 @@ generate_random_psk() {
     tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20
 }
 
+# 获取用户是否开放端口的偏好
+get_expose_preference() {
+    if [ "$AUTO_INSTALL" = true ]; then
+        if [ "$AUTO_EXPOSE" = "true" ]; then
+            echo -e "${GREEN}静默模式：端口将对外开放${RESET}"
+        else
+            echo -e "${YELLOW}静默模式：端口仅监听，不配置防火墙${RESET}"
+        fi
+        return
+    fi
+
+    while true; do
+        read -rp "是否将端口开放到公网？(防火墙设置) [Y/n]: " choice
+        case "$choice" in
+            [yY][eE][sS]|[yY]|"")
+                AUTO_EXPOSE="true"
+                echo -e "${GREEN}端口将对外开放。${RESET}"
+                break
+                ;;
+            [nN][oO]|[nN])
+                AUTO_EXPOSE="false"
+                echo -e "${YELLOW}端口将不会对外开放。${RESET}"
+                break
+                ;;
+            *)
+                echo -e "${RED}请输入 yes 或 no。${RESET}"
+                ;;
+        esac
+    done
+}
+
 # 开放端口 (ufw 和 iptables)
 open_port() {
     local PORT=$1
+    local ALLOW=$2
+
+    if [ "$ALLOW" != "true" ]; then
+        echo -e "${YELLOW}跳过防火墙端口开放操作。${RESET}"
+        return
+    fi
     # 检查 ufw 是否已安装
     if command -v ufw &> /dev/null; then
         echo -e "${CYAN}在 UFW 中开放端口 $PORT${RESET}"
@@ -857,6 +909,7 @@ silent_apply_port_config() {
     local target_psk=$2
     local target_ipv6=$3
     local target_dns=$4
+    local target_expose=$5
 
     mkdir -p "${SNELL_CONF_DIR}/users"
 
@@ -878,7 +931,7 @@ EOF
         if systemctl list-unit-files | grep -q '^snell.service'; then
             systemctl restart snell
         fi
-        open_port "$target_port"
+        open_port "$target_port" "$target_expose"
         echo -e "${GREEN}已更新主 Snell 服务 (端口 ${target_port}) 的配置。${RESET}"
         echo -e "${YELLOW}PSK: ${target_psk}${RESET}"
         echo -e "${YELLOW}IPv6: ${target_ipv6}${RESET}"
@@ -925,7 +978,7 @@ EOF
     systemctl daemon-reload
     systemctl enable "$service_name" >/dev/null 2>&1
     systemctl restart "$service_name"
-    open_port "$target_port"
+    open_port "$target_port" "$target_expose"
 
     if [ "$existed" = true ]; then
         echo -e "${GREEN}已更新端口 ${target_port} 的 Snell 多用户配置。${RESET}"
@@ -1063,7 +1116,7 @@ install_snell() {
             echo -e "${YELLOW}未指定 PSK，已自动生成随机密钥：${PSK}${RESET}"
         fi
 
-        silent_apply_port_config "$PORT" "$PSK" "$IPV6_ENABLED" "$DNS"
+        silent_apply_port_config "$PORT" "$PSK" "$IPV6_ENABLED" "$DNS" "$AUTO_EXPOSE"
         print_install_summary "$PORT" "$PSK" "$IPV6_ENABLED" "$DNS" "$SNELL_VERSION_CHOICE"
         ensure_control_script_installed
         return 0
@@ -1132,6 +1185,7 @@ install_snell() {
 
     get_user_port  # 获取用户输入的端口
     remove_existing_port_config "$PORT"
+    get_expose_preference # 获取防火墙偏好
     get_dns # 获取用户输入的 DNS 服务器
     PSK=$(generate_random_psk)
     IPV6_ENABLED="true"
@@ -1187,7 +1241,7 @@ EOF
     fi
 
     # 开放端口
-    open_port "$PORT"
+    open_port "$PORT" "$AUTO_EXPOSE"
 
     print_install_summary "$PORT" "$PSK" "$IPV6_ENABLED" "$DNS" "$SNELL_VERSION_CHOICE"
     install_control_script
